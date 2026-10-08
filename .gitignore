@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.hbuilderx/
+.DS_Store
+# Local-only study archive includes private screenshots, logs and third-party material.
+hairai-study/
+docs/original-README-hairai-study.md
+# Reference-app catalog crops are not licensed for public distribution.
+client/src/static/catalog/*.jpg

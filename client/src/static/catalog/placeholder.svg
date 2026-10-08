@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 480" role="img" aria-label="发型示意占位图">
+  <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#eee8dc"/><stop offset="1" stop-color="#d9cdbd"/></linearGradient><linearGradient id="hair" x2="0" y2="1"><stop stop-color="#514239"/><stop offset="1" stop-color="#302923"/></linearGradient></defs>
+  <rect width="400" height="480" fill="url(#bg)"/>
+  <path d="M32 480c20-101 79-139 168-139s148 38 168 139" fill="#a3a49d"/>
+  <path d="M95 242c-13-103 25-164 105-164s118 61 105 164l-24 102H119z" fill="url(#hair)"/>
+  <ellipse cx="200" cy="248" rx="80" ry="109" fill="#d5aa86"/>
+  <path d="M114 234c-4-104 36-150 86-150 57 0 98 51 86 150-14-51-41-65-75-72-35 30-63 28-97 72z" fill="url(#hair)"/>
+  <path d="M160 258h16m48 0h16" fill="none" stroke="#694f42" stroke-width="5" stroke-linecap="round"/>
+  <path d="M184 300q16 10 32 0" fill="none" stroke="#a36f62" stroke-width="4" stroke-linecap="round"/>
+  <rect x="65" y="390" width="270" height="49" rx="24" fill="#ffffffdc"/>
+  <text x="200" y="421" text-anchor="middle" font-family="sans-serif" font-size="20" fill="#665748">发型示意图 · 非真实生成</text>
+</svg>

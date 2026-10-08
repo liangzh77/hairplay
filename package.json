@@ -1,0 +1,13 @@
+{
+  "name": "hairplay",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": ["client"],
+  "scripts": {
+    "dev": "npm --workspace client run dev:h5",
+    "build": "npm --workspace client run build:h5",
+    "typecheck": "npm --workspace client run typecheck",
+    "test": "npm --workspace client run test"
+  }
+}
