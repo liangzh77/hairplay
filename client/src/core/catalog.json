@@ -5,7 +5,7 @@
     "category": "现代",
     "group": "潮流",
     "partial": true,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-44-0.jpg"
   },
   {
     "id": "catalog-44-1",
@@ -13,7 +13,7 @@
     "category": "中发",
     "group": "潮流",
     "partial": false,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-44-1.jpg"
   },
   {
     "id": "catalog-45-0",
@@ -21,7 +21,7 @@
     "category": "万圣节",
     "group": "万圣节",
     "partial": true,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-45-0.jpg"
   },
   {
     "id": "catalog-45-1",
@@ -29,7 +29,7 @@
     "category": "万圣节",
     "group": "万圣节",
     "partial": false,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-45-1.jpg"
   },
   {
     "id": "catalog-46-0",
@@ -37,7 +37,7 @@
     "category": "圣诞节",
     "group": "圣诞节",
     "partial": true,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-46-0.jpg"
   },
   {
     "id": "catalog-46-1",
@@ -45,7 +45,7 @@
     "category": "圣诞节",
     "group": "圣诞节",
     "partial": false,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-46-1.jpg"
   },
   {
     "id": "catalog-47-0",
@@ -53,7 +53,7 @@
     "category": "中发",
     "group": "中发",
     "partial": true,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-47-0.jpg"
   },
   {
     "id": "catalog-47-1",
@@ -61,7 +61,7 @@
     "category": "中发",
     "group": "中发",
     "partial": false,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-47-1.jpg"
   },
   {
     "id": "catalog-48-0",
@@ -69,7 +69,7 @@
     "category": "短发",
     "group": "短发",
     "partial": true,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-48-0.jpg"
   },
   {
     "id": "catalog-48-1",
@@ -77,7 +77,7 @@
     "category": "短发",
     "group": "短发",
     "partial": false,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-48-1.jpg"
   },
   {
     "id": "catalog-49-0",
@@ -85,7 +85,7 @@
     "category": "长发",
     "group": "长发",
     "partial": true,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-49-0.jpg"
   },
   {
     "id": "catalog-49-1",
@@ -93,7 +93,7 @@
     "category": "长发",
     "group": "长发",
     "partial": false,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-49-1.jpg"
   },
   {
     "id": "catalog-50-0",
@@ -101,7 +101,7 @@
     "category": "刘海",
     "group": "刘海",
     "partial": true,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-50-0.jpg"
   },
   {
     "id": "catalog-50-1",
@@ -109,7 +109,7 @@
     "category": "刘海",
     "group": "刘海",
     "partial": false,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-50-1.jpg"
   },
   {
     "id": "catalog-51-0",
@@ -117,7 +117,7 @@
     "category": "编发",
     "group": "编发",
     "partial": true,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-51-0.jpg"
   },
   {
     "id": "catalog-51-1",
@@ -125,7 +125,7 @@
     "category": "编发",
     "group": "编发",
     "partial": false,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-51-1.jpg"
   },
   {
     "id": "catalog-52-0",
@@ -133,7 +133,7 @@
     "category": "盘发",
     "group": "盘发",
     "partial": true,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-52-0.jpg"
   },
   {
     "id": "catalog-52-1",
@@ -141,7 +141,7 @@
     "category": "盘发",
     "group": "盘发",
     "partial": false,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-52-1.jpg"
   },
   {
     "id": "catalog-53-0",
@@ -149,7 +149,7 @@
     "category": "男士",
     "group": "男士",
     "partial": true,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-53-0.jpg"
   },
   {
     "id": "catalog-53-1",
@@ -157,7 +157,7 @@
     "category": "男士",
     "group": "男士",
     "partial": false,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-53-1.jpg"
   },
   {
     "id": "catalog-54-0",
@@ -165,7 +165,7 @@
     "category": "现代",
     "group": "现代",
     "partial": true,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-54-0.jpg"
   },
   {
     "id": "catalog-54-1",
@@ -173,7 +173,7 @@
     "category": "现代",
     "group": "现代",
     "partial": false,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-54-1.jpg"
   },
   {
     "id": "catalog-55-0",
@@ -181,7 +181,7 @@
     "category": "传统",
     "group": "传统",
     "partial": true,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-55-0.jpg"
   },
   {
     "id": "catalog-55-1",
@@ -189,7 +189,7 @@
     "category": "传统",
     "group": "传统",
     "partial": false,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-55-1.jpg"
   },
   {
     "id": "catalog-56-0",
@@ -197,7 +197,7 @@
     "category": "世界杯",
     "group": "世界杯",
     "partial": true,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-56-0.jpg"
   },
   {
     "id": "catalog-56-1",
@@ -205,7 +205,7 @@
     "category": "世界杯",
     "group": "世界杯",
     "partial": false,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-catalog-56-1.jpg"
   },
   {
     "id": "dracula",
@@ -213,6 +213,6 @@
     "category": "万圣节",
     "group": "万圣节",
     "partial": false,
-    "image": "/static/catalog/placeholder.svg"
+    "image": "/static/catalog/ai-dracula.jpg"
   }
 ]

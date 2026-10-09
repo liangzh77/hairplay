@@ -5,7 +5,7 @@
 - 源码：`client/`
 - 项目说明与目录结构：`docs/PROJECT.md`
 - 命名：`docs/NAME.md`
-- 示例图片：`client/src/static/catalog/placeholder.svg`
+- 发型示例图：`client/src/static/catalog/ai-*.jpg`（AI 生成的静态目录示例，不是用户照片生成结果）
 
 ```bash
 cd client

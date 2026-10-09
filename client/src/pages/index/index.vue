@@ -31,6 +31,7 @@ function hideBanner(){state.value.bannerHidden=true;persist();}
 function toggleRemember(){state.value.rememberOptions=!state.value.rememberOptions;if(!state.value.rememberOptions)state.value.options={};else state.value.options={...options.value};persist();}
 const previewUrl=computed(()=>modal.value==='photo'?photo.value?.url:modal.value==='galleryPreview'?galleryDetail.value?.image:detail.value?.image);
 const beforeImage='/static/catalog/placeholder.svg';
+const draculaStyle=catalog.find(s=>s.id==='dracula')!;
 </script>
 
 <template>
@@ -50,8 +51,8 @@ const beforeImage='/static/catalog/placeholder.svg';
      <view class="topbar"><button aria-label="返回" class="back" @click="goBack()"><image src="/static/icons/back.svg" /></button><text class="eyebrow">已保存的风格</text><view class="back-spacer" /></view>
      <text class="section-title">{{galleryDetail.name}}</text><text class="muted">{{new Date(galleryDetail.created).toLocaleDateString()}}</text>
      <view class="demo-badge">演示记录 · 目录示例，非 AI 生成</view>
-     <view class="compare-image"><image :src="compare?beforeImage:galleryDetail.image" mode="aspectFit" /><text class="compare-label">{{compare?'前：另一目录示例':'后：演示目录示例'}}</text><button class="compare-toggle" @click="compare=!compare">点击比较</button></view>
-     <text class="muted">比较仅展示两张目录示例，不是您的照片生成效果。</text>
+     <view class="compare-image"><image :src="compare?beforeImage:galleryDetail.image" mode="aspectFit" /><text class="compare-label">{{compare?'前：占位示意图':'后：目录示例'}}</text><button class="compare-toggle" @click="compare=!compare">点击比较</button></view>
+     <text class="muted">比较仅展示占位示意图与目录示例，不是您的照片生成效果。</text>
      <button class="outline wide" @click="modal='galleryPreview'">放大演示图片</button>
      <button class="gold wide" @click="notice=downloadDemo(galleryDetail.image,galleryDetail.name)">下载演示图片</button>
      <button class="outline wide" @click="goBack();switchTab('发现')">尝试其他</button>
@@ -59,14 +60,14 @@ const beforeImage='/static/catalog/placeholder.svg';
     <template v-else-if="tab==='发现'">
      <view v-if="!state.bannerHidden" class="invite"><image class="gift" src="/static/icons/gift.svg" /><button class="invite-text" @click="showInfo('本地邀请演示：邀请、积分和分享服务尚未连接，不会发送邀请或奖励积分。')">邀请好友 — 各得 30 积分</button><button class="invite-link" @click="showInfo('本地邀请演示：未连接账户与积分服务。')">邀请</button><button aria-label="关闭邀请横幅" class="invite-close" @click="hideBanner">×</button></view>
      <text class="eyebrow discover-label">发现</text>
-     <view v-if="category==='所有风格'&&!query" class="hero"><view><text class="hero-title">找到您的完美造型</text><button class="hero-link" @click="switchTab('AI匹配')">AI匹配 →</button></view><button class="hero-card" @click="openStyle(catalog.find(s=>s.id==='dracula')!)"><image src="/static/catalog/placeholder.svg" mode="aspectFill" /><text>德古拉后梳油头</text><text class="muted">万圣节</text></button></view>
+     <view v-if="category==='所有风格'&&!query" class="hero"><view><text class="hero-title">找到您的完美造型</text><button class="hero-link" @click="switchTab('AI匹配')">AI匹配 →</button></view><button class="hero-card" @click="openStyle(draculaStyle)"><image :src="draculaStyle.image" mode="aspectFill" /><text>德古拉后梳油头</text><text class="muted">万圣节</text></button></view>
      <view class="search"><image class="search-icon" src="/static/icons/search.svg" /><input v-model="query" aria-label="搜索发型" placeholder="搜索发型..." confirm-type="search" /><button v-if="query" aria-label="清空搜索" @click="query=''">×</button></view>
      <button class="upload-prompt" @click="switchTab('AI匹配')"><text class="scissors">✂</text><view><text>有喜欢的发型照片？</text><text class="muted">上传照片，在自己脸上试试同款发型</text></view><text class="chevron">›</text></button>
      <view class="categories"><view v-for="(row,i) in [categories.slice(0,4),categories.slice(4,10),categories.slice(10)]" :key="i" class="category-row"><button v-for="c in row" :key="c" :class="{active:category===c}" :aria-label="'分类 '+c" @click="setCategory(c)">{{c==='男士'?'男':c}}</button></view></view>
      <view class="list-title"><text>{{category}}</text><text class="muted">{{styles.length}}</text></view>
      <view v-if="!styles.length" class="empty"><text class="empty-title">没有找到匹配的发型</text><text class="muted">试试其他关键词或分类</text><button class="outline" @click="query='';category='所有风格'">重置筛选</button></view>
      <view v-else class="catalog"><view v-for="(column,j) in [left,right]" :key="j" class="catalog-column" :class="{'large-column':j===0}"><button v-for="s in column" :key="s.id" class="catalog-card" :aria-label="'查看 '+s.name" @click="openStyle(s)"><image :src="s.image" :mode="s.partial?'aspectFill':'aspectFit'" :class="{portrait:s.partial}" /><text>{{s.name}}</text><text class="muted">{{s.category}}</text></button></view></view>
-     <text class="catalog-note">本地研究 · 仅收录已观察的 {{catalog.length}} 个目录示例；原版完整数据未采集。公开版使用原创示意占位图，不含参考应用图片。</text>
+     <text class="catalog-note">本地研究 · 仅收录已观察的 {{catalog.length}} 个目录示例；原版完整数据未采集。全部发型图由 AI 生成，不含参考应用图片。</text>
     </template>
     <template v-else-if="tab==='AI匹配'">
      <text class="eyebrow">AI匹配</text><text class="page-title ai-title">获得个性化发型推荐</text><text class="section-title">上传您的照片</text>
