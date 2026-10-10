@@ -15,7 +15,7 @@ import {fileURLToPath} from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const offline = ['gallery-browser.mjs', 'gallery-lock.mjs', 'gallery-layout.mjs', 'image-cache-browser.mjs'];
-const live = ['live-verify.mjs', 'live-failclosed.mjs', 'live-normal-delete.mjs', 'public-features-smoke.mjs'];
+const live = ['live-verify.mjs', 'live-failclosed.mjs', 'live-normal-delete.mjs', 'live-picking-race.mjs', 'public-features-smoke.mjs'];
 
 const args = process.argv.slice(2);
 const named = args.filter(arg => !arg.startsWith('--'));

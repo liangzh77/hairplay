@@ -30,6 +30,6 @@ npm run test:browser       # 真实 Chrome 端到端（需先 build:public）
 npm run test:browser:live  # 部署后的线上复核（需要网络，只读）
 ```
 
-`client/tests/browser/` 里的脚本用真实 Chrome 驱动**已构建的 H5 产物**（或线上站点），覆盖单测无法证明的行为：两个标签页同时删除时的 Web Locks 串行化与「过期快照不复活」、无 Web Locks 时的 fail-closed、Service Worker 图片缓存与 hash URL 绕开旧 HTTP 缓存、回滚用的 reset worker、生成图片不进公开缓存、窄屏布局、以及与线上一致的功能冒烟。
+`client/tests/browser/` 里的脚本用真实 Chrome 驱动**已构建的 H5 产物**（或线上站点），覆盖单测无法证明的行为：两个标签页同时删除时的 Web Locks 串行化与「过期快照不复活」、无 Web Locks 时的 fail-closed、照片还在读取时不得误报「未上传」、Service Worker 图片缓存与 hash URL 绕开旧 HTTP 缓存、回滚用的 reset worker、生成图片不进公开缓存、窄屏布局、以及与线上一致的功能冒烟。
 
 离线脚本会在临时端口上自己起静态服务器（stub 掉 `/api/*`，**不调用真实生成服务、不发邮件、不写服务器**），先 `npm --workspace client run build:public` 生成被测产物。Chrome 按顺序查找：`$HAIRPLAY_CHROME`、`$CHROME_PATH`、系统常见安装路径、Playwright 的 `channel: 'chrome'`；`HAIRPLAY_HEADED=1` 可看着它跑，`HAIRPLAY_BASE=<url>` 可指向预览环境。依赖是 `playwright-core`（不下载浏览器）。
