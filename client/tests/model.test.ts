@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 // A real, decodable JPEG so the payload checks are exercised against genuine bytes.
-const jpegB64=readFileSync(new URL('../src/static/catalog/catalog-44-0.jpg',import.meta.url)).toString('base64');
+const jpegB64=readFileSync(new URL('../src/static/catalog/ai-catalog-44-0.jpg',import.meta.url)).toString('base64');
 const jpegPayload='data:image/jpeg;base64,'+jpegB64;
 const fakePayload='data:image/jpeg;base64,/9j/'+'A'.repeat(2_000);
 import {catalog,categories,filterStyles,heroStyleFor,initialState,decodeState,validatePhoto,LocalGenerationService,makeRecord,removeRecords,makeGeneratedRecord,decodeGenerations,removeGenerations,insertGeneration,isValidGeneratedImage,jpegEndsWithEoi,jpegHasSegments,GENERATION_LIMIT,GENERATION_IMAGE_MAX,type GeneratedRecord} from '../src/core/model';

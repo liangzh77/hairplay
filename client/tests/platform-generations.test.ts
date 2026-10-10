@@ -11,7 +11,7 @@ const store=new Map<string,string>();
 };
 const {loadGenerations,storeGenerations,mutateGenerations}=await import('../src/platform/index');
 
-const jpegB64=readFileSync(new URL('../src/static/catalog/catalog-44-0.jpg',import.meta.url)).toString('base64');
+const jpegB64=readFileSync(new URL('../src/static/catalog/ai-catalog-44-0.jpg',import.meta.url)).toString('base64');
 const image='data:image/jpeg;base64,'+jpegB64;
 const record=(id:string)=>({id,name:'庞巴杜发型',image,created:'2026-10-10T00:00:00.000Z',source:'ai' as const});
 
