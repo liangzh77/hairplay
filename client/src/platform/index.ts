@@ -136,13 +136,16 @@ export function setupImageCache():()=>void{
  return ()=>{};
 }
 export interface Photo {url:string;width:number;height:number}
-export async function pickPhoto():Promise<Photo|null>{
+export async function pickPhoto(onReading?:()=>void):Promise<Photo|null>{
+ // `onReading` fires once a file has actually been chosen and the bytes are
+ // about to be decoded, so callers can distinguish "no photo yet" from
+ // "photo still being read".
  // #ifdef H5
  return new Promise((resolve,reject)=>{const input=document.createElement('input');input.type='file';input.accept='image/jpeg,image/png,image/webp';input.setAttribute('aria-label','选择本地照片');input.style.display='none';document.body.appendChild(input);
- const clean=()=>input.remove();input.oncancel=()=>{clean();resolve(null);};input.onchange=async()=>{const file=input.files?.[0];if(!file){clean();resolve(null);return;}try{const error=validatePhoto(file);if(error)throw new Error(error);const url=URL.createObjectURL(file);try{const img=new Image();img.src=url;await img.decode();const dimensions=validatePhoto({...file,size:file.size,type:file.type,width:img.naturalWidth,height:img.naturalHeight});if(dimensions)throw new Error(dimensions);resolve({url,width:img.naturalWidth,height:img.naturalHeight});}catch(e){URL.revokeObjectURL(url);throw e;}}catch(e){reject(e);}finally{clean();}};input.click();});
+ const clean=()=>input.remove();input.oncancel=()=>{clean();resolve(null);};input.onchange=async()=>{const file=input.files?.[0];if(!file){clean();resolve(null);return;}onReading?.();try{const error=validatePhoto(file);if(error)throw new Error(error);const url=URL.createObjectURL(file);try{const img=new Image();img.src=url;await img.decode();const dimensions=validatePhoto({...file,size:file.size,type:file.type,width:img.naturalWidth,height:img.naturalHeight});if(dimensions)throw new Error(dimensions);resolve({url,width:img.naturalWidth,height:img.naturalHeight});}catch(e){URL.revokeObjectURL(url);throw e;}}catch(e){reject(e);}finally{clean();}};input.click();});
  // #endif
  // #ifdef MP-WEIXIN
- return new Promise((resolve,reject)=>uni.chooseImage({count:1,sizeType:['original'],sourceType:['album','camera'],success:async(res)=>{try{const f=(res.tempFiles as UniApp.ChooseImageSuccessCallbackResultFile[])[0];const path=res.tempFilePaths[0];const ext=path.split('.').pop()?.toLowerCase();const type=ext==='png'?'image/png':ext==='webp'?'image/webp':ext==='jpg'||ext==='jpeg'?'image/jpeg':'';const info=await uni.getImageInfo({src:path});const error=validatePhoto({size:f.size,type,width:info.width,height:info.height});if(error)throw new Error(error);resolve({url:path,width:info.width,height:info.height});}catch(e){reject(e);}},fail:(e)=>e.errMsg.includes('cancel')?resolve(null):reject(new Error('无法读取照片，请重试'))}));
+ return new Promise((resolve,reject)=>uni.chooseImage({count:1,sizeType:['original'],sourceType:['album','camera'],success:async(res)=>{onReading?.();try{const f=(res.tempFiles as UniApp.ChooseImageSuccessCallbackResultFile[])[0];const path=res.tempFilePaths[0];const ext=path.split('.').pop()?.toLowerCase();const type=ext==='png'?'image/png':ext==='webp'?'image/webp':ext==='jpg'||ext==='jpeg'?'image/jpeg':'';const info=await uni.getImageInfo({src:path});const error=validatePhoto({size:f.size,type,width:info.width,height:info.height});if(error)throw new Error(error);resolve({url:path,width:info.width,height:info.height});}catch(e){reject(e);}},fail:(e)=>e.errMsg.includes('cancel')?resolve(null):reject(new Error('无法读取照片，请重试'))}));
  // #endif
 }
 export async function generateLiveImage(photo:Photo,styleId:string,requirements:string):Promise<string>{

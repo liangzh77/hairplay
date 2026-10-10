@@ -70,3 +70,22 @@ test('AI records can be deleted from the gallery and from the detail screen',()=
  assert.match(ui,/尚未保存到本机相册，请先点击「下载这张」/);
  assert.match(ui,/@click="downloadLive\(\)">下载这张/);
 });
+
+test('a photo that is still being read is never reported as a missing photo',()=>{
+ const ui=page(),layer=platform();
+ // `picking` covers the decode window only: it starts once a file was chosen,
+ // so the file dialog itself does not claim the picture is being read.
+ assert.match(layer,/export async function pickPhoto\(onReading\?:\(\)=>void\):Promise<Photo\|null>/);
+ assert.match(layer,/const file=input\.files\?\.\[0\];if\(!file\)\{clean\(\);resolve\(null\);return;\}onReading\?\.\(\)/);
+ assert.match(layer,/success:async\(res\)=>\{onReading\?\.\(\);try\{/);
+ assert.match(ui,/pickPhoto\(\(\)=>\{picking\.value=true;\}\)/);
+ assert.match(ui,/finally\{picking\.value=false;\}/);
+ // The reading guard must be checked before the missing-photo guard, otherwise
+ // a slow decode is still answered with "请先上传您的照片".
+ const reading=ui.indexOf("if(picking.value){error.value='照片正在读取，请稍候再试';return;}");
+ const missing=ui.indexOf("if(!photo.value){error.value='请先上传您的照片';return;}");
+ assert.ok(reading>0&&missing>0&&reading<missing);
+ assert.match(ui,/:disabled="loading\|\|picking"/);
+ assert.match(ui,/picking\?'照片读取中…'/);
+ assert.match(ui,/picking\?'正在读取照片…':'选择本地照片'/);
+});

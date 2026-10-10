@@ -144,6 +144,22 @@ try{
  assert.equal(await page.locator('uni-button[aria-label^="AI 生成记录"]').count(),0,'reload must not resurrect concurrently deleted records');
  await other.close();
 
+ // Clicking 试试 AI 发型 in the moment the photo is still being decoded must be
+ // answered honestly (or the click waits for the button to become enabled) --
+ // never with "请先上传您的照片" while the picture is on its way in.
+ const race=await context.newPage();race.on('pageerror',e=>errors.push(e.message));
+ await race.goto(`${url}`,{waitUntil:'networkidle'});await race.locator('.tabs uni-button[aria-label="导航 AI匹配"]').click();
+ const raceChooser=race.waitForEvent('filechooser');await race.locator('uni-button').filter({hasText:'选择本地照片'}).click();(await raceChooser).setFiles(photoPath);
+ await race.locator('uni-button').filter({hasText:'试试 AI 发型'}).click();
+ assert.equal(await race.locator('.error').filter({hasText:'请先上传您的照片'}).count(),0,'a photo being read is not a missing photo');
+ if(!await race.locator('uni-button').filter({hasText:'确认上传并生成'}).count()){
+  // The click landed inside the decode window: finish reading, then generate.
+  await race.locator('.photo-area').waitFor();
+  await race.locator('uni-button').filter({hasText:'试试 AI 发型'}).click();
+ }
+ await race.locator('uni-text').filter({hasText:'确认发送照片？'}).waitFor();
+ await race.close();
+
  // A storage write that silently does nothing must not be reported as saved:
  // run it in a fresh page whose setItem is a no-op for the generations key.
  const full=await context.newPage();full.on('pageerror',e=>errors.push(e.message));
