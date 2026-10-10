@@ -1,3 +1,10 @@
 import { defineConfig } from 'vite';
 import uni from '@dcloudio/vite-plugin-uni';
-export default defineConfig({ plugins: [(uni as unknown as {default:typeof uni}).default()], server: { host:'127.0.0.1',port:8765,strictPort:true }, build:{sourcemap:false} });
+import {fileURLToPath} from 'node:url';
+import {resolve} from 'node:path';
+const clientRoot=fileURLToPath(new URL('.',import.meta.url));
+const base=process.env.HAIRPLAY_BASE || '/';
+const apiPort=process.env.HAIRPLAY_API_PORT||'8777';
+if(!/^\d{2,5}$/.test(apiPort)||Number(apiPort)>65535)throw new Error('Invalid local API port');
+if(!/^\/(?:[a-zA-Z0-9_-]+\/)*$/.test(base))throw new Error('Invalid HAIRPLAY_BASE');
+export default defineConfig({ base, plugins: [(uni as unknown as {default:typeof uni}).default()], server: { host:'127.0.0.1',port:8765,strictPort:true,cors:false,fs:{strict:true,allow:[clientRoot,resolve(clientRoot,'../node_modules')],deny:['.env','.env.*','**/.secrets/**','**/.data/**','**/*.sqlite*']},proxy:{[base+'api/']:{target:'http://127.0.0.1:'+apiPort,changeOrigin:false}} }, build:{sourcemap:false} });

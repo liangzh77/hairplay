@@ -2,6 +2,16 @@ node_modules/
 dist/
 .hbuilderx/
 .DS_Store
+__pycache__/
+# Server-side API credentials; never bundle or publish.
+.secrets/
+.data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
 # Local-only study archive includes private screenshots, logs and third-party material.
 hairai-study/
 docs/original-README-hairai-study.md

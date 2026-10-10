@@ -3,11 +3,19 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "workspaces": ["client"],
+  "workspaces": [
+    "client"
+  ],
   "scripts": {
     "dev": "npm --workspace client run dev:h5",
     "build": "npm --workspace client run build:h5",
     "typecheck": "npm --workspace client run typecheck",
-    "test": "npm --workspace client run test"
+    "test": "npm --workspace client run test && node --test server/*.test.mjs",
+    "dev:api": "node server/ark.mjs",
+    "test:dev-security": "node scripts/test-dev-security.mjs"
+  },
+  "dependencies": {
+    "nodemailer": "^10.0.16",
+    "sharp": "^0.34.5"
   }
 }
