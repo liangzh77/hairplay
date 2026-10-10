@@ -11,11 +11,16 @@
     "build": "npm --workspace client run build:h5",
     "typecheck": "npm --workspace client run typecheck",
     "test": "npm --workspace client run test && node --test server/*.test.mjs",
+    "test:browser": "node client/tests/browser/run-all.mjs",
+    "test:browser:live": "node client/tests/browser/run-all.mjs --live",
     "dev:api": "node server/ark.mjs",
     "test:dev-security": "node scripts/test-dev-security.mjs"
   },
   "dependencies": {
     "nodemailer": "^10.0.16",
     "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.64.0"
   }
 }

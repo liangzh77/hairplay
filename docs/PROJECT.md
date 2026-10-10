@@ -10,6 +10,7 @@
 | `client/` | **当前唯一在维护的源码**：uni-app + Vue 3 + TS（H5 / mp-weixin） |
 | `client/src/` | 页面、业务模型、平台适配层、离线素材 |
 | `client/tests/` | 单元测试（Node test runner） |
+| `client/tests/browser/` | 真实 Chrome 端到端脚本（Playwright，`npm run test:browser`） |
 | `docs/` | 项目说明与本仓库文档 |
 | `tools/` | 预留的辅助脚本目录 |
 
@@ -23,6 +24,7 @@ npm run build:h5     # 构建 H5 产物
 npm run build:mp-weixin
 npm run typecheck
 npm test
+npm run test:browser   # 真实 Chrome 端到端（先 build:public）
 ```
 
 ## 当前状态与限制
