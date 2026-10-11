@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import io
+import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -126,6 +128,108 @@ class ReleaseSafetyTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Metadata prohibited', result.stderr)
         self.assertFalse(self.build.exists())
+
+
+class ApiReleaseTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.tree = self.root / 'api'
+        (self.tree / 'server').mkdir(parents=True)
+        (self.tree / 'client/src/core').mkdir(parents=True)
+        (self.tree / 'package.json').write_text('{"name":"hairplay-api"}')
+        (self.tree / 'package-lock.json').write_text('{"lockfileVersion":3}')
+        for name in ['ark.mjs', 'auth.mjs', 'mail.mjs']:
+            (self.tree / 'server' / name).write_text(f'// {name}')
+        (self.tree / 'client/src/core/catalog.json').write_text('[]')
+
+    def test_pack_api_round_trip_and_manifest_kind(self):
+        archive, manifest = self.root / 'api.tgz', self.root / 'api-manifest.json'
+        release.pack_api(self.tree, archive, manifest)
+        expected = release.manifest(manifest, 'api')
+        self.assertIn('server/ark.mjs', expected)
+        self.assertNotIn('index.html', expected)
+        release.verify_archive(archive, expected)
+        release.verify_tree(self.tree, expected)
+        # An API manifest is not a valid H5 manifest and vice versa.
+        with self.assertRaises(ValueError):
+            release.manifest(manifest, 'static')
+        with self.assertRaises(ValueError):
+            release.manifest(manifest, 'nonsense')
+
+    def test_pack_api_rejects_dependencies_secrets_and_state(self):
+        for name in ['node_modules/sharp/index.js', '.secrets/ark.env', '.data/auth.sqlite',
+                     'server/backup.sqlite', '.env', 'server/ark.mjs.bak']:
+            with self.subTest(name=name):
+                path = self.tree / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'x')
+                with self.assertRaises(ValueError):
+                    release.pack_api(self.tree, self.root / 'bad-api.tgz', self.root / 'bad-api.json')
+                self.assertFalse((self.root / 'bad-api.tgz').exists())
+                path.unlink()
+                if name.startswith(('.secrets/', '.data/')):
+                    path.parent.rmdir()
+
+    def test_pack_api_requires_the_whole_backend(self):
+        (self.tree / 'server/auth.mjs').unlink()
+        with self.assertRaisesRegex(ValueError, 'Unexpected directory|Incomplete API tree'):
+            release.pack_api(self.tree, self.root / 'missing.tgz', self.root / 'missing.json')
+        self.assertFalse((self.root / 'missing.tgz').exists())
+
+    def test_api_manifest_rejects_secret_entries(self):
+        manifest = self.root / 'api-manifest.json'
+        release.pack_api(self.tree, self.root / 'api.tgz', manifest)
+        data = json.loads(manifest.read_text())
+        data['.secrets/ark.env'] = '0' * 64
+        manifest.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, 'Secret/state file prohibited'):
+            release.manifest(manifest, 'api')
+    def test_verify_api_release_accepts_runtime_entries_only(self):
+        manifest = self.root / 'api-manifest.json'
+        release.pack_api(self.tree, self.root / 'api.tgz', manifest)
+        expected = release.manifest(manifest, 'api')
+        deployed = self.root / 'deployed'
+        shutil.copytree(self.tree, deployed)
+        (deployed / 'node_modules/sub').mkdir(parents=True)
+        (deployed / 'node_modules/sub/index.js').write_text('dep')
+        (deployed / '.data').symlink_to(self.root)
+        (deployed / '.secrets').symlink_to(self.root)
+        release.verify_api_tree(deployed, expected)
+        # Dependencies must be a real directory; the two links must be links.
+        (deployed / 'node_modules').rename(self.root / 'moved-node-modules')
+        (deployed / 'node_modules').symlink_to(self.root / 'moved-node-modules')
+        with self.assertRaisesRegex(ValueError, 'node_modules must be a real directory'):
+            release.verify_api_tree(deployed, expected)
+        (deployed / 'node_modules').unlink()
+        (self.root / 'moved-node-modules').rename(deployed / 'node_modules')
+        (deployed / '.data').unlink()
+        (deployed / '.data').mkdir()
+        with self.assertRaisesRegex(ValueError, r'\.data must be a symlink'):
+            release.verify_api_tree(deployed, expected)
+        (deployed / '.data').rmdir()
+        (deployed / '.data').symlink_to(self.root)
+        # Extra files, changed files and missing files are all rejected.
+        cases = [('server/stray.mjs', 'extra'), ('backup.sqlite', 'extra'), ('client/src/core/stray.json', 'extra'),
+                 ('server/ark.mjs', 'changed'), ('client/src/core/catalog.json', 'changed'),
+                 ('server/mail.mjs', 'missing'), ('package-lock.json', 'missing')]
+        for name, mutate in cases:
+            with self.subTest(name=name, mutate=mutate):
+                path = deployed / name
+                original = path.read_bytes() if path.exists() else None
+                if mutate == 'extra':
+                    path.write_text('x')
+                elif mutate == 'changed':
+                    path.write_text('// changed')
+                else:
+                    path.unlink()
+                with self.assertRaises(ValueError):
+                    release.verify_api_tree(deployed, expected)
+                if mutate == 'extra':
+                    path.unlink()
+                else:
+                    path.write_bytes(original)
 
 
 if __name__ == '__main__':

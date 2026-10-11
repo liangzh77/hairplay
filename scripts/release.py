@@ -18,6 +18,12 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+# The API release is the backend tree only: no build output, no dependencies and
+# no secrets. node_modules is installed server-side from the locked manifest.
+API_REQUIRED = ('package.json', 'package-lock.json', 'server/ark.mjs', 'server/auth.mjs', 'server/mail.mjs')
+API_ALLOWED = re.compile(r'^(?:server/[A-Za-z0-9_.-]+\.mjs|client/src/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+|package\.json|package-lock\.json)$')
+
+
 def safe_name(name):
     parts = PurePosixPath(name).parts
     if (not parts or name != '/'.join(parts) or name.startswith('/') or
@@ -27,12 +33,24 @@ def safe_name(name):
     return name
 
 
-def manifest(path):
+def manifest(path, kind='static'):
     data = json.loads(Path(path).read_text())
-    if not isinstance(data, dict) or not data or 'index.html' not in data:
+    if not isinstance(data, dict) or not data:
         raise ValueError('Invalid manifest')
+    if kind == 'static':
+        if 'index.html' not in data:
+            raise ValueError('Invalid manifest')
+    elif kind == 'api':
+        missing = [name for name in API_REQUIRED if name not in data]
+        if missing:
+            raise ValueError(f'Invalid API manifest, missing {missing}')
+    else:
+        raise ValueError(f'Unknown kind: {kind}')
     for name, sha in data.items():
         safe_name(name)
+        if kind == 'api' and (name.startswith(('node_modules/', '.data/', '.secrets/', '.git/')) or
+                              re.search(r'\.(?:sqlite|sqlite-wal|sqlite-shm|env|log|pem|key)$', name)):
+            raise ValueError(f'Secret/state file prohibited: {name}')
         if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{64}', sha):
             raise ValueError(f'Invalid hash: {name}')
     return data
@@ -69,6 +87,43 @@ def verify_tree(root, expected):
                          f'missing={sorted(expected.keys()-files.keys())}, '
                          f'changed={sorted(n for n in files.keys() & expected.keys() if files[n] != expected[n])}, '
                          f'unexpected_dirs={sorted(dirs-directories(expected))}')
+
+
+# Runtime entries a deployed API release has on top of its manifest: installed
+# dependencies and the two links to the persistent database and the secrets.
+API_RUNTIME = ('node_modules', '.data', '.secrets')
+
+
+def verify_api_tree(root, expected):
+    """Verify a deployed API release: every manifest file byte-identical, the
+    runtime entries present in the expected shape and nothing else."""
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError('Release must be a real directory')
+    dirs = directories(expected)
+    for name, sha in expected.items():
+        path = root / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f'Missing or unsafe release file: {name}')
+        if digest(path.read_bytes()) != sha:
+            raise ValueError(f'Changed release file: {name}')
+    for base in ['.'] + sorted(dirs):
+        # iterdir() yields base names, so compare names and not relative paths.
+        allowed = {PurePosixPath(n).name for n in expected if str(PurePosixPath(n).parent) == base}
+        allowed |= {PurePosixPath(d).name for d in dirs if str(PurePosixPath(d).parent) == base}
+        if base == '.':
+            allowed |= set(API_RUNTIME)
+        for entry in sorted(p.name for p in (root / base).iterdir()):
+            if entry not in allowed:
+                raise ValueError(f'Unexpected release entry: {base}/{entry}')
+        if base == '.':
+            for name in API_RUNTIME:
+                path = root / name
+                if name == 'node_modules':
+                    if path.is_symlink() or not path.is_dir():
+                        raise ValueError('node_modules must be a real directory')
+                elif not path.is_symlink():
+                    raise ValueError(f'{name} must be a symlink')
 
 
 def verify_archive(path, expected):
@@ -138,6 +193,28 @@ def pack(root, archive, output_manifest):
     print(f'PACK_OK files={len(files)} archive={archive}')
 
 
+def pack_api(root, archive, output_manifest):
+    # Same exclusive-write, USTAR, verify-after-write discipline as the H5 pack.
+    files, dirs = tree(root)
+    if not set(API_REQUIRED) <= files.keys() or dirs != directories(files):
+        raise ValueError('Incomplete API tree or unexpected directory')
+    for name in files:
+        if not API_ALLOWED.fullmatch(name):
+            raise ValueError(f'Unapproved API file: {name}')
+    with open(output_manifest, 'x') as f:
+        json.dump(dict(sorted(files.items())), f, indent=2)
+        f.write('\n')
+    with open(archive, 'xb') as out, tarfile.open(fileobj=out, mode='w:gz', format=tarfile.USTAR_FORMAT) as tar:
+        for name in sorted(files):
+            data = (Path(root) / name).read_bytes()
+            entry = tarfile.TarInfo(name)
+            entry.size, entry.mode, entry.mtime = len(data), 0o644, 0
+            tar.addfile(entry, io.BytesIO(data))
+    verify_archive(archive, files)
+    verify_tree(root, files)
+    print(f'PACK_API_OK files={len(files)} archive={archive}')
+
+
 def verify_http(base, expected):
     base = base.rstrip('/') + '/'
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -161,21 +238,31 @@ def verify_http(base, expected):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['pack', 'verify-archive', 'verify-tree', 'verify-http'])
+    parser.add_argument('action', choices=['pack', 'pack-api', 'verify-archive', 'verify-tree',
+                                           'verify-api-release', 'verify-http'])
     parser.add_argument('source')
     parser.add_argument('manifest')
     parser.add_argument('--archive')
+    parser.add_argument('--kind', choices=['static', 'api'], default='static')
     args = parser.parse_args()
     if args.action == 'pack':
         if not args.archive:
             parser.error('pack requires --archive')
         pack(args.source, args.archive, args.manifest)
+    elif args.action == 'pack-api':
+        if not args.archive:
+            parser.error('pack-api requires --archive')
+        pack_api(args.source, args.archive, args.manifest)
     else:
-        expected = manifest(args.manifest)
+        # A deployed API release is verified against an API manifest, always.
+        kind = 'api' if args.action == 'verify-api-release' else args.kind
+        expected = manifest(args.manifest, kind)
         if args.action == 'verify-archive':
             verify_archive(args.source, expected)
         elif args.action == 'verify-tree':
             verify_tree(args.source, expected)
+        elif args.action == 'verify-api-release':
+            verify_api_tree(args.source, expected)
         else:
             verify_http(args.source, expected)
         if args.action != 'verify-http':
