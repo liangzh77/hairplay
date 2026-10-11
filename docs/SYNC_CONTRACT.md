@@ -36,6 +36,14 @@ GET gallery：`{owner,context,revision,images}`。
 
 BC/storage 通知只加速失效和重读。观察到 owner/context 不一致先同步隐藏旧私图/收藏，再探测；同版本幂等，不循环写同一快照。更高 revision 立即隔离旧显示并重读。后台恢复、聚焦核验；网络不可达时身份未知而非已确认。生成在 A 已受理后可继续在 A 完成；切 B 不显示/写 A 结果，不谎称取消上游。下载前后有门禁，但无法追回已保存文件。无 WebSocket/瞬时跨设备一致性承诺。
 
+## 删除确认意图（SC-R3）
+
+单图和批量确认打开时捕获稳定 ID、名称、cloud 指针及已核验身份 ticket 的有效性闭包；不保留图片字节，不在点击确认时从易失详情/刷新后列表猜目标。较新 gallery 通知仍立即隔离展示快照并重读，但同一会话的待确认意图不被清空；GET 挂起或失败时仍可确认正确 ID。目标已被其它页删掉时，真实服务器幂等删除返回 `deleted:false` 和当前快照，不增加 revision。
+
+明确关闭、账户 invalidate/quarantine 同步清空意图及弹窗；同邮箱重登也不能复用旧 ticket。发送每个删除前检查捕获身份，响应仍走集中接纳、缓存仍锁内复核，没有低 revision 例外。已经发出的请求无法撤回。旧成功响应被较新资源版本替代时，不写旧缓存，只提示核对并刷新。批量逐项真实删除，已成功项用其接纳快照更新展示/缓存；部分失败显示已完成数量，停止后续云端请求，不虚报整批成功。该流程不提供服务端批量事务或全球实时一致性。
+
+新增 `delete-intent-real.mjs` 的确定性真实 API 窗口（含 BC/storage fallback）和 `delete-confirm-order-real.mjs` 的真实 revision4→3 响应对照，接入完整 browser runner。仅 mailer/upstream 禁用或 stub；503 错误窗口由浏览器路由显式注入，所有成功响应及 SQLite/revision 来自真实本地 API。
+
 ## API-first 兼容与回滚
 
 先 API 后静态。无 context 的旧已公开客户端：favorites/gallery/私图读暂保留 Cookie 认证；favorites 原子编辑/采纳、delete/gender 暂兼容，不声称有新身份绑定保证。generate/import/logout 必须刷新新 UI（428），不能为了不停机而继续无头上传或退出后来的会话。任何提供但错误的 context 均拒绝。新 UI 没有无头重试后门。此策略依据历史 UI 的实际接口调用；新增敏感请求即使只发送头而不发 body 也必须立即拒绝。上线前还需独立验收及明确授权；API 回退保留附属表/触发器和当前数据库，**不能恢复整份旧备份**（会丢新写入）。支持的实际回退代码为 e18dda7/2f9a748：正确验证码登录、退出、再登录、性别修改均可用；2f9a748 的收藏原子编辑和图库插入/删除保持 revision。e18dda7 没有收藏/图库接口，但不会丢已有数据。再升级保持 context 稳定、计数单调、全部图/收藏/额度；不把旧版本无 metadata 的 HTTP 响应当 v2 最新快照，新 UI 需同步回退，恢复 v2 后重新 session/资源核验。已获得旧响应的客户端仍由新 metadata/context 门禁拒绝。该范围不支持运行未发布的 da2 中间服务（其四列 INSERT/应用层 bump 已改变合同），不承诺任意人工 SQL、删除触发器、改变主键/图库内容 UPDATE 或未知旧代码兼容；其他目标须先跑同等业务往返验证。

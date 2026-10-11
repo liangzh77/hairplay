@@ -10,6 +10,16 @@ import {loadState,pickPhoto,generateLiveImage,releasePhoto,lockModal,setupEscape
 // pictures that only exist on this device (generated before cloud storage, or
 // kept after signing out). `cloud` marks the former.
 interface AlbumItem {id:string;name:string;created:string;image:string;cloud?:string}
+type DeleteTarget=Pick<AlbumItem,'id'|'name'|'cloud'>;
+// Confirmation is user intent, not an album/display snapshot. Keep no image bytes.
+const deleteIntent=ref<{items:DeleteTarget[];current:()=>boolean}|null>(null);
+const deleting=ref(false);
+function openDelete(items:AlbumItem[],kind:'delete'|'deleteGenerated'){
+ const epoch=identityGeneration(),guard=account.value?accountGuard():()=>!account.value;
+ if(!items.length||!guard()){error.value='账户尚未核验或所选图片已不在，请重新选择。';return;}
+ deleteIntent.value={items:items.map(({id,name,cloud})=>({id,name,cloud})),current:()=>epoch===identityGeneration()&&guard()};
+ modal.value=kind;
+}
 const state=ref(loadState());const generations=ref<GeneratedRecord[]>(loadGenerations());const cloudImages=ref<CloudImage[]|null>(null);const cloudMessage=ref('');const favoriteMessage=ref('');const tab=ref('发现');const category=ref('所有风格');const query=ref('');const detail=ref<Style|null>(null);const favoriteDetail=ref<SavedStyle|null>(null);const generatedDetail=ref<AlbumItem|null>(null);const generationSaved=ref(true);const liveName=ref('');const photo=ref<Photo|null>(null);const picking=ref(false);const error=ref('');const notice=ref('');const loading=ref(false);const advanced=ref(false);const requirements=ref('');const color=ref('保持原色');const modal=ref('');const info=ref('');const selectMode=ref(false);const selected=ref<string[]>([]);const scrollTop=ref(0);let rememberedScroll=0;let currentScroll=0;
 // Account-scoped state must not survive a sign-in/sign-out. The coordinator binds
 // responses to a captured session context and resource revision; `memoryImages` holds
@@ -35,7 +45,7 @@ const favorites=computed(()=>account.value?accountFavorites.value:state.value.fa
 function accountGuard(){try{return captureGuard();}catch{return ()=>false;}}
 function requireCurrent(current:()=>boolean){if(!current())throw new Error('账户已变更，已忽略旧请求结果。');}
 function invalidateAccount(){accountSync.invalidate();clearAccountView();}
-function clearAccountView(){account.value=null;accountFavorites.value=[];cloudImages.value=null;memoryImages.value={};importedPointers.value={};generatedDetail.value=null;favoriteDetail.value=null;liveImage.value='';modal.value='';error.value='';notice.value='';favoriteMessage.value='';cloudMessage.value='';selected.value=[];}
+function clearAccountView(){deleteIntent.value=null;account.value=null;accountFavorites.value=[];cloudImages.value=null;memoryImages.value={};importedPointers.value={};generatedDetail.value=null;favoriteDetail.value=null;liveImage.value='';modal.value='';error.value='';notice.value='';favoriteMessage.value='';cloudMessage.value='';selected.value=[];}
 onQuarantine(clearAccountView);
 function staleResult(){return {ok:false,message:''};}
 const memoryImages=ref<Record<string,string>>({});
@@ -276,21 +286,31 @@ function albumItemFor(id:string){return album.value.find(i=>i.id===id);}
 // Deleting a cloud picture removes it from the account, then from this browser's
 // cache. If the account delete fails the local copy is kept as well, so the app
 // never claims a picture is gone while it is still on the server.
-async function removeAlbumItems(items:AlbumItem[]):Promise<{ok:boolean;message:string}>{
+async function removeAlbumItems(items:DeleteTarget[],identityCurrent:()=>boolean):Promise<{ok:boolean;message:string}>{
  if(!items.length)return {ok:true,message:''};
- let current=items.some(i=>i.cloud)?accountGuard():()=>true;
- let lastDelete:object|undefined;
- const cloudIds=items.filter(i=>i.cloud).map(i=>i.cloud as string);
- if(cloudIds.length){
-  for(const id of cloudIds)try{lastDelete=await cloudDelete(id);current=responseGuard(lastDelete);if(!current())return staleResult();}catch(e){return !(e instanceof StaleResponse)&&current()?{ok:false,message:`云端删除未完成：${e instanceof Error?e.message:'请稍后重试。'}`}:staleResult();}
-  if(lastDelete&&current())cloudImages.value=cloudSnapshotImages(lastDelete);
+ let current=identityCurrent;
+ let lastDelete:object|undefined,failure='';
+ const wanted=items.filter(i=>i.cloud).map(i=>i.cloud as string),cloudIds:string[]=[];
+ for(const id of wanted){
+  if(!identityCurrent())return staleResult();
+  try{const result=await cloudDelete(id);current=responseGuard(result);
+   if(!current())throw new StaleResponse();
+   lastDelete=result;cloudIds.push(id);cloudImages.value=cloudSnapshotImages(result);
+  }catch(e){
+   if(!identityCurrent())return staleResult();
+   if(e instanceof StaleResponse){void syncCloudAlbum();return {ok:false,message:'删除请求结果已被较新相册版本替代，请核对刷新后的相册；未确认的目标可重新选择。'};}
+   failure=`云端删除未全部完成（已完成 ${cloudIds.length}/${wanted.length} 张）：${e instanceof Error?e.message:'请稍后重试。'}`;break;
+  }
  }
  const localIds=new Set([...items.filter(i=>!i.cloud).map(i=>i.id),...cloudIds,...Object.keys(importedPointers.value).filter(id=>cloudIds.includes(importedPointers.value[id]))]);
  const {ok,message}=await commitGenerations(list=>{if(lastDelete)rememberGallery(lastDelete);return list.filter(r=>!localIds.has(r.id)&&!(r.cloud&&cloudIds.includes(r.cloud)));},current);
- if(!current())return staleResult();
- return ok?{ok:true,message:''}:{ok:false,message:`图片已从账户删除，但本机缓存未能清除：${message}`};}
+ if(!current()){
+  if(!identityCurrent())return staleResult();
+  void syncCloudAlbum();return {ok:false,message:`${failure?failure+'；':''}删除结果已被较新相册版本替代，请核对刷新后的相册。`};
+ }
+ return !ok?{ok:false,message:`${failure?failure+'；':''}本机缓存未能清除：${message}`} :failure?{ok:false,message:failure}:{ok:true,message:''};}
 function showInfo(message:string){info.value=message;modal.value='info';}
-function closeModal(){if(modal.value==='liveResult')liveImage.value='';modal.value='';}
+function closeModal(){deleteIntent.value=null;if(modal.value==='liveResult')liveImage.value='';modal.value='';}
 const dateOf=(value:string)=>new Date(value).toLocaleDateString();
 watch(modal,v=>lockModal(!!v));
 let previousOptions={...options.value};
@@ -347,20 +367,24 @@ async function generate(){if(!account.value)return;let current=accountGuard();co
 async function downloadFavorite(){if(!favoriteDetail.value)return;
  try{notice.value=await downloadStyle(favoriteDetail.value.image,favoriteDetail.value.name);}catch{notice.value='模板图片下载失败，请重试';}
 }
-async function deleteSelected(){const items=selected.value.map(albumItemFor).filter((i):i is AlbumItem=>!!i);if(!items.length)return;
- const current=items.some(i=>i.cloud)?accountGuard():()=>true;
- const {ok,message}=await removeAlbumItems(items);
- if(!current())return;
- closeModal();
- if(!ok){error.value=message;return;}
- error.value='';selected.value=[];selectMode.value=false;notice.value=account.value||items.some(i=>i.cloud)?'已删除所选图片（云端账户与本机缓存）':'已从本机删除所选图片';}
-async function deleteGenerated(){const item=generatedDetail.value;if(!item)return;
- const current=item.cloud?accountGuard():()=>true;
- const {ok,message}=await removeAlbumItems([item]);
- if(!current())return;
- closeModal();
- if(!ok){error.value=message;return;}
- error.value='';generatedDetail.value=null;notice.value=item.cloud?'已删除这张图片（云端账户与本机缓存）':'已从本机删除这张生成图片';}
+function openDeleteSelected(){openDelete(selected.value.map(albumItemFor).filter((i):i is AlbumItem=>!!i),'delete');}
+function openDeleteGenerated(){if(generatedDetail.value)openDelete([generatedDetail.value],'deleteGenerated');}
+async function confirmDelete(batch:boolean){
+ if(deleting.value)return;
+ const intent=deleteIntent.value;
+ if(!intent||!intent.current()){closeModal();error.value='账户已变更或尚未核验，删除确认已取消，请重新选择。';return;}
+ deleting.value=true;
+ try{const {ok,message}=await removeAlbumItems(intent.items,intent.current);
+  if(!intent.current()||deleteIntent.value!==intent)return;
+  closeModal();
+  if(!ok){error.value=message;return;}
+  error.value='';generatedDetail.value=null;
+  if(batch){selected.value=[];selectMode.value=false;}
+  notice.value=intent.items.some(i=>i.cloud)?(batch?'已删除所选图片（云端账户与本机缓存）':'已删除这张图片（云端账户与本机缓存）'):(batch?'已从本机删除所选图片':'已从本机删除这张生成图片');
+ }finally{deleting.value=false;}
+}
+async function deleteSelected(){await confirmDelete(true);}
+async function deleteGenerated(){await confirmDelete(false);}
 async function downloadGeneratedRecord(){const item=generatedDetail.value;if(!item)return;
  const current=item.cloud?accountGuard():()=>true;
  try{if(item.cloud){const message=await downloadCloudImage(item.cloud,item.name,current);if(current())notice.value=message;}else{await downloadGenerated(item.image,item.name);if(current())notice.value='已下载到本机（文件名以 HairPlay-AI 开头）';}}
@@ -446,7 +470,7 @@ const heroStyle=computed(()=>heroStyleFor(chosenGender.value));
      <button class="gold wide" @click="downloadGeneratedRecord()">{{generatedDetail.cloud?'下载云端原图':'下载到本机'}}</button>
      <button v-if="pendingLocal(generatedDetail)" class="gold wide" @click="retryLocalLink(generatedDetail)">重试本机关联</button>
      <button v-if="!generatedDetail.cloud" class="gold wide" :disabled="loading" @click="syncToCloud(generatedDetail)">同步到云端</button>
-     <button class="outline wide" @click="modal='deleteGenerated'">删除这张</button>
+     <button class="outline wide" @click="openDeleteGenerated">删除这张</button>
      <button class="outline wide" @click="goBack()">返回相册</button>
     </template>
     <template v-else-if="tab==='发现'">
@@ -481,7 +505,7 @@ const heroStyle=computed(()=>heroStyleFor(chosenGender.value));
       <view v-else class="gallery-grid"><button v-for="f in favorites" :key="f.id" class="gallery-card" :aria-label="'收藏的模板 '+f.name" @click="openFavorite(f)"><image :src="assetUrl(f.image)" mode="aspectFill" /><text class="card-badge template">模板 · 非 AI 生成</text><text>{{f.name}}</text><text class="muted">{{dateOf(f.created)}}</text></button></view>
       <view v-if="favoriteMessage" class="notice" role="status">{{favoriteMessage}}</view>
      </view>
-     <button v-if="selectMode" class="danger wide" :disabled="!selected.length" @click="modal='delete'">删除所选（{{selected.length}}）</button>
+     <button v-if="selectMode" class="danger wide" :disabled="!selected.length" @click="openDeleteSelected">删除所选（{{selected.length}}）</button>
     </template>
     <template v-else-if="tab==='个人资料'">
      <text class="eyebrow">ACCOUNT</text><view class="profile-heading"><text class="page-title">个人资料</text></view>
@@ -535,8 +559,8 @@ const heroStyle=computed(()=>heroStyleFor(chosenGender.value));
     <template v-else-if="modal==='info'"><text class="modal-title">说明</text><text class="modal-copy">{{info}}</text><button class="gold wide" @click="closeModal">知道了</button></template>
     <template v-else-if="modal==='confirmUpload'"><text class="modal-title">确认发送照片？</text><text class="modal-copy">您选中的照片将由有型服务端发送至火山方舟 Seedream 进行发型编辑，消耗云端额度（每账户终身 3 张，失败不扣）。生成结果会保存到您的云端账户——在其它设备登录同一邮箱也能看到——并在本机保留一份缓存；上传的原照片不会被保存。不要上传未经他人同意的照片。</text><button class="gold wide" @click="generate">确认上传并生成</button><button class="outline wide" @click="closeModal">取消</button></template>
     <template v-else-if="modal==='liveResult'&&liveImage"><text class="modal-title">AI 发型试戴 · 结果</text><image class="result-image" :src="liveImage" mode="aspectFit" /><text class="modal-copy">结果可能改变面貌或细节，请自行核对；{{generationSaved?'已保存到相册「我的生成」，可随时删除。':'尚未保存，请先点击「下载这张」。'}}</text><button v-if="!generationSaved" class="gold wide" @click="downloadLive()">下载这张</button><button class="gold wide" @click="closeModal();switchTab('画廊')">查看相册</button><button class="outline wide" @click="closeModal">关闭</button></template>
-    <template v-else-if="modal==='delete'"><text class="modal-title">删除所选的 {{selected.length}} 张图片？</text><text class="modal-copy">将从云端账户删除所选图片（同时删除本机缓存）；删除后无法恢复，也不会退回已使用的生成额度。</text><button class="danger wide" @click="deleteSelected">确认删除</button><button class="outline wide" @click="closeModal">取消</button></template>
-    <template v-else-if="modal==='deleteGenerated'"><text class="modal-title">删除这张生成图片？</text><text class="modal-copy">将从{{generatedDetail?.cloud?'云端账户和本机缓存':'本机相册'}}删除「{{generatedDetail?.name}}」，删除后无法恢复；不会退回已使用的生成额度。</text><button class="danger wide" @click="deleteGenerated">确认删除</button><button class="outline wide" @click="closeModal">取消</button></template>
+    <template v-else-if="modal==='delete'"><text class="modal-title">删除所选的 {{deleteIntent?.items.length}} 张图片？</text><text class="modal-copy">将删除所选图片（云端图片同时删除账户副本和本机缓存，本机独有图片仅从本机删除）；删除后无法恢复，也不会退回已使用的生成额度。</text><button class="danger wide" :disabled="deleting" @click="deleteSelected">确认删除</button><button class="outline wide" @click="closeModal">取消</button></template>
+    <template v-else-if="modal==='deleteGenerated'"><text class="modal-title">删除这张生成图片？</text><text class="modal-copy">将从{{deleteIntent?.items[0]?.cloud?'云端账户和本机缓存':'本机相册'}}删除「{{deleteIntent?.items[0]?.name}}」，删除后无法恢复；不会退回已使用的生成额度。</text><button class="danger wide" :disabled="deleting" @click="deleteGenerated">确认删除</button><button class="outline wide" @click="closeModal">取消</button></template>
     <template v-else-if="modal==='settings'"><text class="modal-title">隐私与偏好</text><button class="outline wide" @click="toggleRemember">{{state.rememberOptions?'☑':'□'}} 记住高级选项偏好</button><text class="modal-copy">上传的原照片只在生成时发送一次，服务器与本站都不会保存它。登录后，AI 生成结果保存在您的云端账户（删除时会同时删除云端副本），收藏的模板也与账户同步；未登录时不显示云端相册和账户收藏，未登录新添的收藏只存本机，当前版本生成须先登录，退出登录同样不会删除账户中已有的图片和收藏。已关联账户的云端图以账户原图为准，本机 localStorage 可保留压缩缓存；本机独有历史记录尚无账户副本。私图 HTTP 响应为 no-store，公开 Service Worker CacheStorage 不缓存私图；这不等于清除本机压缩副本或第三方服务的缓存。</text><button class="outline wide" @click="restoreBanner">恢复邀请横幅</button><button class="gold wide" @click="closeModal">完成</button></template>
     <template v-else-if="modal==='language'"><text class="modal-title">选择语言</text><text class="modal-copy">当前：简体中文。其他语言翻译尚未实现，不会假保存为已切换。</text><view class="language-list"><button v-for="lang in ['English','Español','Français','Deutsch','Italiano','Português','简体中文','繁體中文','日本語','한국어','Bahasa Indonesia','Русский']" :key="lang" :disabled="lang!=='简体中文'">{{lang}} {{lang==='简体中文'?'✓ 当前':'· 未实现'}}</button></view><button class="gold wide" @click="closeModal">完成</button><button class="outline wide" @click="closeModal">取消</button></template>
    </view>
