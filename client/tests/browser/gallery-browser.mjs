@@ -385,7 +385,10 @@ try {
 	const local = await context.newPage();
 	watch(local);
 	await local.goto(url, {waitUntil: 'networkidle'});
-	const good = id => ({id, name: '庞巴杜发型', image: realJpeg(), created: new Date().toISOString(), source: 'ai'});
+	// Distinct names bind the clicked record to the asserted ID. The target is
+	// deliberately older, so selecting the first descending-time card is wrong.
+	const good = id => ({id, name: id === 'gen-local' ? '本机同步目标' : '非法云指针保图', image: realJpeg(),
+		created: id === 'gen-local' ? '2026-01-01T00:00:00.000Z' : '2026-01-01T00:00:00.002Z', source: 'ai'});
 	await local.evaluate(list => localStorage.setItem('hairplay.generations.v1', JSON.stringify(list)), [
 		good('gen-local'),
 		{id: 'gen-fake', name: '伪造', image: 'data:image/jpeg;base64,AAAA', created: new Date().toISOString(), source: 'ai'},
@@ -408,7 +411,12 @@ try {
 	await local.locator('.tabs uni-button[aria-label="导航 画廊"]').click();
 	assert.equal(await local.locator('uni-button[aria-label^="AI 生成记录"]').count(), 2, 'only the two real JPEGs survive');
 	assert.equal(await local.locator('.card-badge.ai').filter({hasText: '仅本机'}).count(), 2);
-	await local.locator('uni-button[aria-label="AI 生成记录 庞巴杜发型"]').first().click();
+	const retained = (await readGenerations(local)).find(r => r.id === 'gen-bad-cloud');
+	assert.ok(retained, 'an invalid cloud pointer must not discard the valid local image');
+	assert.equal(retained.cloud, undefined, 'the invalid cloud pointer must be stripped');
+	assert.equal(await cards(local).first().getAttribute('aria-label'), 'AI 生成记录 非法云指针保图');
+	assert.equal(await cards(local).nth(1).getAttribute('aria-label'), 'AI 生成记录 本机同步目标', 'the import target must not be the first card');
+	await local.locator('uni-button[aria-label="AI 生成记录 本机同步目标"]').click();
 	await local.locator('.ai-badge').filter({hasText: '仅保存在本机'}).waitFor();
 	await local.locator('uni-button').filter({hasText: '同步到云端'}).click();
 	await local.locator('.notice').filter({hasText: '已同步到云端账户'}).waitFor();
@@ -416,6 +424,9 @@ try {
 	assert.equal(album.length, 1, 'the imported picture must reach the account');
 	const imported = (await readGenerations(local)).find(r => r.id === 'gen-local');
 	assert.equal(imported?.cloud, album[0].id, 'the local record must remember the account id');
+	const unselected = (await readGenerations(local)).find(r => r.id === 'gen-bad-cloud');
+	assert.ok(unselected, 'the unselected local image must remain');
+	assert.equal(unselected.cloud, undefined, 'importing the target must not associate the unselected local image');
 	await local.locator('.ai-badge').filter({hasText: '云端账户'}).waitFor();
 	await local.locator('uni-button').filter({hasText: '返回相册'}).click();
 	await local.waitForFunction(() => document.querySelectorAll('.card-badge.ai').length === 2);
