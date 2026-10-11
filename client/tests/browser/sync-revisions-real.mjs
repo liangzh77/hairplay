@@ -1,4 +1,4 @@
-import {fixture,btn,nav,poll,browser,assert,STATE_KEY} from './real-fixture.mjs';
+import {fixture,btn,nav,poll,browser,assert,STATE_KEY,bytes} from './real-fixture.mjs';
 const favorites=p=>p.locator('uni-button[aria-label^="收藏的模板"]');
 const state=p=>p.evaluate(()=>({cache:JSON.parse(localStorage.getItem('hairai.study.v1')).accountFavorites,writes:window.reviewWrites.length}));
 let failures=0,cases=0;
@@ -58,6 +58,23 @@ await check('ABA contents do not authorize a lower revision GET; replacement GET
   const before=await state(p);releaseOld();await poll(()=>later);await p.waitForTimeout(200);assert.deepEqual(await state(p),before);await nav(p,'画廊');assert.equal(await favorites(p).count(),0);
   console.log('ABA_REVISION '+JSON.stringify({old:captured.revision,current:current.revision,sameContents:true,lateWrites:0,replacementHeld:true}));
  }finally{releaseOld?.();releaseNew?.();await f.close();}
+});
+await check('unpersisted import link cannot recreate a cloud row after peer deletion while fresh GET held',async()=>{
+ const f=await fixture();let release;
+ try{
+  const {p,context,store,a}=f;
+  await p.evaluate(image=>localStorage.setItem('hairplay.generations.v1',JSON.stringify([{id:'gen-pending-link',name:'pending-link',created:'2026-10-11T00:00:00Z',source:'ai',image}])), 'data:image/jpeg;base64,'+bytes.toString('base64'));
+  await p.reload({waitUntil:'networkidle'});
+  await p.evaluate(()=>{const original=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){if(k==='hairplay.generations.v1'){const rows=JSON.parse(v);rows.forEach(r=>delete r.cloud);v=JSON.stringify(rows);}return original.call(this,k,v);};});
+  await nav(p,'画廊');await p.locator('uni-button[aria-label^="AI 生成记录"]').click();await btn(p,'同步到云端').click();await p.locator('.error').filter({hasText:'未能记住它'}).waitFor();
+  assert.equal(store.countImages(a.id),1);await btn(p,'返回相册').click();
+  const q=await context.newPage();await q.goto(f.url,{waitUntil:'networkidle'});await nav(q,'画廊');
+  let held=false;const gate=new Promise(r=>release=r);
+  await p.route('**/api/gallery',async route=>{const response=await route.fetch();held=true;await gate;await route.fulfill({response}).catch(()=>{});});
+  await q.locator('uni-button[aria-label^="AI 生成记录"]').filter({hasText:'云端'}).click();await btn(q,'删除这张').click();await btn(q,'确认删除').click();await poll(()=>store.countImages(a.id)===0);await poll(()=>held);
+  await p.waitForTimeout(150);assert.equal(await p.locator('uni-button[aria-label^="AI 生成记录"]').count(),0);assert.equal(await p.locator('.result-image img').count(),0);
+  console.log('PENDING_LINK_DELETE serverImages=0 cards=0 replacementHeld=true');
+ }finally{release?.();await f.close();}
 });
 console.log('SYNC_REVISIONS_REAL_COMPLETE cases='+cases+' failures='+failures);
 }finally{await browser.close();}

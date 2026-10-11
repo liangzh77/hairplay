@@ -48,15 +48,15 @@ const album=computed<AlbumItem[]>(()=>{
  // A freshly downloaded, verified copy wins over a cached one: `memoryImages` is
  // only ever filled with bytes that passed verification while the local write was
  // refused, so it can never be a downgrade of what the cache holds.
- const list:AlbumItem[]=(account.value&&cloudImages.value?cloudImages.value:[]).map(img=>({id:img.id,name:img.name,created:img.created,cloud:img.id,image:memoryImages.value[img.id]||cached.get(img.id)?.image||''}));
+ const list:AlbumItem[]=(account.value&&cloudImages.value?cloudImages.value:[]).map(img=>({id:img.id,name:img.name,created:img.created,cloud:img.id,image:memoryImages.value[img.id]||cached.get(img.id)?.image||generations.value.find(r=>importedPointers.value[r.id]===img.id)?.image||''}));
  for(const r of generations.value){
   if(r.cloud)continue;
   const linked=importedPointers.value[r.id];
   if(!linked){list.push({id:r.id,name:r.name,created:r.created,image:r.image});continue;}
-  // Imported in this session but not linked in storage yet: show the one row that
-  // belongs to the account copy instead of a local duplicate of it.
-  if(account.value){if(!list.some(i=>i.cloud===linked))list.push({id:r.id,name:r.name,created:r.created,cloud:linked,image:r.image});}
-  else list.push({id:r.id,name:r.name,created:r.created,image:r.image});
+  // An unpersisted import link is not another authority. Only the accepted
+  // server list above may produce its cloud row, including after peer deletion
+  // or while a replacement snapshot is held. Local bytes can fill that row.
+  if(!account.value)list.push({id:r.id,name:r.name,created:r.created,image:r.image});
  }
  return list.sort((a,b)=>b.created.localeCompare(a.created));
 });
@@ -236,7 +236,7 @@ async function syncCloudAlbum(){
  const accountCurrent=accountGuard();let current=accountCurrent;
  try{const images=await cloudAlbum();current=responseGuard(images);if(!current())return;
   const live=new Set(images.map(i=>i.id));
-  const cleared=await commitGenerations(list=>{rememberGallery(images);return list.filter(r=>!r.cloud||live.has(r.cloud));},current);
+  const cleared=await commitGenerations(list=>{rememberGallery(images);return list.filter(r=>(!r.cloud||live.has(r.cloud))&&(!importedPointers.value[r.id]||live.has(importedPointers.value[r.id])));},current);
   if(!current())return;
   cloudImages.value=images;cloudMessage.value=cleared.ok?'':`账户相册已同步，但本机缓存未更新：${cleared.message}`;
   void cacheCloudImages(images,current);

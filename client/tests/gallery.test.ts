@@ -30,10 +30,10 @@ test('the account album is authoritative and its pictures are cached locally',()
  assert.match(ui,/if\(!current\(\)\)return;\s*cloudImages\.value=images;/);
  // A cached picture that is gone from the account is purged, so a deletion made
  // on another device can never be resurrected by this browser's cache.
- assert.match(ui,/commitGenerations\(list=>\{rememberGallery\(images\);return list\.filter\(r=>!r\.cloud\|\|live\.has\(r\.cloud\)\);\},current\)/);
+ assert.match(ui,/commitGenerations\(list=>\{rememberGallery\(images\);return list\.filter\(r=>\(!r\.cloud\|\|live\.has\(r\.cloud\)\)&&\(!importedPointers\.value\[r\.id\]\|\|live\.has\(importedPointers\.value\[r\.id\]\)\)\);\},current\)/);
  assert.match(ui,/const cached=new Map\(generations\.value\.filter\(r=>r\.cloud\)/);
  assert.match(ui,/for\(const r of generations\.value\)\{\s*if\(r\.cloud\)continue;/);
- assert.match(ui,/if\(!list\.some\(i=>i\.cloud===linked\)\)list\.push/);
+ assert.doesNotMatch(ui,/if\(!list\.some\(i=>i\.cloud===linked\)\)list\.push/); // pending local link cannot recreate a deleted cloud row
  assert.match(ui,/async function cacheCloudImages\(images:CloudImage\[\],current:\(\)=>boolean\)/);
  // A cached copy that no longer decodes is downloaded again instead of shown broken.
  assert.match(ui,/const cached=generations\.value\.find\(r=>r\.cloud===img\.id\);\s*if\(cached&&await verifyGeneratedImage\(cached\.image\)\)continue;/);
@@ -43,7 +43,7 @@ test('the account album is authoritative and its pictures are cached locally',()
  assert.match(ui,/const cached=generations\.value\.find\(r=>r\.cloud===img\.id\);/);
  assert.match(ui,/if\(at<0\)return insertGeneration\(list,\{\.\.\.makeGeneratedRecord\(img\.name,stored,img\.id\),\.\.\.receiptStamp\(images\)\}\);\s*const next=\[\.\.\.list\];next\[at\]=\{\.\.\.list\[at\],name:img\.name,image:stored,\.\.\.receiptStamp\(images\)\};return next;\},current\)/);
  // The freshly downloaded copy wins over the cached bytes in the album too.
- assert.match(ui,/image:memoryImages\.value\[img\.id\]\|\|cached\.get\(img\.id\)\?\.image\|\|''/);
+ assert.match(ui,/image:memoryImages\.value\[img\.id\]\|\|cached\.get\(img\.id\)\?\.image\|\|generations\.value\.find\(r=>importedPointers\.value\[r\.id\]===img\.id\)\?\.image\|\|''/);
  // A picture the device cannot write to its own storage is still rendered from
  // memory, and saying so is part of the notice.
  assert.match(ui,/memoryImages\.value=\{\.\.\.memoryImages\.value,\[img\.id\]:stored\}/);
