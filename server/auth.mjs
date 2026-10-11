@@ -43,11 +43,36 @@ export class AuthStore{
    // rehearsal, or a release from before the column existed) are migrated here.
    if(!this.db.prepare('PRAGMA table_info(gallery)').all().some(col=>col.name==='hash'))this.db.exec('ALTER TABLE gallery ADD COLUMN hash TEXT');
    this.db.exec('CREATE INDEX IF NOT EXISTS gallery_user_hash ON gallery(user,hash)');
-   if(!this.db.prepare('PRAGMA table_info(sessions)').all().some(col=>col.name==='context'))this.db.exec('ALTER TABLE sessions ADD COLUMN context TEXT');
-   const sessionContext=this.db.prepare('UPDATE sessions SET context=? WHERE hash=?');
-   for(const row of this.db.prepare('SELECT hash FROM sessions WHERE context IS NULL').all())sessionContext.run(randomBytes(16).toString('hex'),row.hash);
+   // Preserve positional INSERTs in the real rollback targets. Transfer the
+   // unpublished four-column intermediate schema without replacing the DB.
+   this.db.exec('CREATE TABLE IF NOT EXISTS session_contexts(hash TEXT PRIMARY KEY,context TEXT NOT NULL UNIQUE)');
+   if(this.db.prepare('PRAGMA table_info(sessions)').all().some(col=>col.name==='context')){
+    this.db.exec(`INSERT OR IGNORE INTO session_contexts SELECT hash,context FROM sessions WHERE context IS NOT NULL;
+     ALTER TABLE sessions DROP COLUMN context;`);
+   }
+   this.db.exec(`CREATE TRIGGER IF NOT EXISTS session_context_cleanup AFTER DELETE ON sessions BEGIN DELETE FROM session_contexts WHERE hash=OLD.hash; END;
+    DELETE FROM session_contexts WHERE hash NOT IN (SELECT hash FROM sessions);`);
+   const sessionContext=this.db.prepare('INSERT INTO session_contexts(hash,context) VALUES(?,?)');
+   for(const row of this.db.prepare('SELECT hash FROM sessions WHERE hash NOT IN (SELECT hash FROM session_contexts)').all())sessionContext.run(row.hash,randomBytes(16).toString('hex'));
    this.db.exec(`CREATE TABLE IF NOT EXISTS resource_revisions(user INTEGER PRIMARY KEY,favorites INTEGER NOT NULL DEFAULT 0,gallery INTEGER NOT NULL DEFAULT 0);
     INSERT OR IGNORE INTO resource_revisions SELECT users.id,EXISTS(SELECT 1 FROM favorites WHERE user=users.id),EXISTS(SELECT 1 FROM gallery WHERE user=users.id) FROM users;`);
+   // Triggers survive rollback to services unaware of revision counters.
+   // Actual legacy writes, including ABA, advance the persistent versions.
+   this.db.exec(`CREATE TRIGGER IF NOT EXISTS revision_favorites_insert AFTER INSERT ON favorites BEGIN
+     INSERT INTO resource_revisions(user) SELECT NEW.user WHERE NOT EXISTS(SELECT 1 FROM resource_revisions WHERE user=NEW.user);
+     UPDATE resource_revisions SET favorites=favorites+1 WHERE user=NEW.user; END;
+    CREATE TRIGGER IF NOT EXISTS revision_favorites_update AFTER UPDATE OF ids ON favorites WHEN NEW.ids IS NOT OLD.ids BEGIN
+     INSERT INTO resource_revisions(user) SELECT NEW.user WHERE NOT EXISTS(SELECT 1 FROM resource_revisions WHERE user=NEW.user);
+     UPDATE resource_revisions SET favorites=favorites+1 WHERE user=NEW.user; END;
+    CREATE TRIGGER IF NOT EXISTS revision_favorites_delete AFTER DELETE ON favorites BEGIN
+     INSERT INTO resource_revisions(user) SELECT OLD.user WHERE NOT EXISTS(SELECT 1 FROM resource_revisions WHERE user=OLD.user);
+     UPDATE resource_revisions SET favorites=favorites+1 WHERE user=OLD.user; END;
+    CREATE TRIGGER IF NOT EXISTS revision_gallery_insert AFTER INSERT ON gallery BEGIN
+     INSERT INTO resource_revisions(user) SELECT NEW.user WHERE NOT EXISTS(SELECT 1 FROM resource_revisions WHERE user=NEW.user);
+     UPDATE resource_revisions SET gallery=gallery+1 WHERE user=NEW.user; END;
+    CREATE TRIGGER IF NOT EXISTS revision_gallery_delete AFTER DELETE ON gallery BEGIN
+     INSERT INTO resource_revisions(user) SELECT OLD.user WHERE NOT EXISTS(SELECT 1 FROM resource_revisions WHERE user=OLD.user);
+     UPDATE resource_revisions SET gallery=gallery+1 WHERE user=OLD.user; END;`);
    // Backfill legacy pictures without changing their ids or bytes.
    const update=this.db.prepare('UPDATE gallery SET hash=? WHERE id=?');
    for(const row of this.db.prepare('SELECT id,bytes FROM gallery WHERE hash IS NULL').all())update.run(createHash('sha256').update(row.bytes).digest('hex'),row.id);
@@ -88,9 +113,17 @@ export class AuthStore{
   let user=this.db.prepare('SELECT * FROM users WHERE email=?').get(email);
   if(!user){if(this.db.prepare('SELECT count(*) n FROM users').get().n>=100)return null;this.db.prepare('INSERT INTO users(email,gender) VALUES(?,?)').run(email,gender);user=this.db.prepare('SELECT * FROM users WHERE email=?').get(email);}
   const token=randomBytes(32).toString('base64url');this.db.prepare('DELETE FROM sessions WHERE expires<=?').run(n);
-  this.db.prepare('INSERT INTO sessions(hash,user,expires,context) VALUES(?,?,?,?)').run(this.hash(token),user.id,n+7*86400000,randomBytes(16).toString('hex'));return token;
+  const sessionHash=this.hash(token);
+  this.db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(sessionHash,user.id,n+7*86400000);
+  this.db.prepare('INSERT INTO session_contexts VALUES(?,?)').run(sessionHash,randomBytes(16).toString('hex'));return token;
  });}
- session(token){if(!token||! /^[A-Za-z0-9_-]{43}$/.test(token))return null;return this.db.prepare('SELECT users.*,sessions.context FROM sessions JOIN users ON user=users.id WHERE hash=? AND expires>?').get(this.hash(token),this.now())||null;}
+ session(token){if(!token||! /^[A-Za-z0-9_-]{43}$/.test(token))return null;return this.tx(()=>{
+  const hash=this.hash(token),row=this.db.prepare('SELECT users.*,session_contexts.context FROM sessions JOIN users ON user=users.id LEFT JOIN session_contexts ON session_contexts.hash=sessions.hash WHERE sessions.hash=? AND expires>?').get(hash,this.now());
+  if(!row)return null;
+  // Old processes can insert after constructor backfill. Serialize lazy fill.
+  if(!row.context){row.context=randomBytes(16).toString('hex');this.db.prepare('INSERT INTO session_contexts VALUES(?,?)').run(hash,row.context);}
+  return row;
+ });}
  logout(token){if(token)this.db.prepare('DELETE FROM sessions WHERE hash=?').run(this.hash(token));}
  setGender(user,gender){if(!validGender(gender))throw Object.assign(Error('请选择男、女或不填写'),{status:400});this.db.prepare('UPDATE users SET gender=? WHERE id=?').run(gender,user);}
  recover(){this.db.prepare("UPDATE jobs SET state='failed' WHERE state='pending' AND created<?").run(this.now()-600000);}
@@ -115,15 +148,9 @@ export class AuthStore{
   if(this.db.prepare('SELECT count(*) n FROM gallery WHERE user=?').get(user).n>=GALLERY_LIMIT)throw Object.assign(Error('云端相册最多保存 '+GALLERY_LIMIT+' 张图片，请先删除一张再试'),{status:429});
   const id=randomBytes(12).toString('hex'),created=this.now();
   this.db.prepare('INSERT INTO gallery VALUES(?,?,?,?,?,?,?,?)').run(id,user,String(meta?.name||'AI 发型').slice(0,60)||'AI 发型',validStyleId(meta?.style)?meta.style:null,created,bytes.length,bytes,hash);
-  this.bump(user,'gallery');
   return {id,created};
  }
  revision(user,resource){if(!['favorites','gallery'].includes(resource))throw Error('Unknown resource');return this.db.prepare(`SELECT ${resource} revision FROM resource_revisions WHERE user=?`).get(user)?.revision??0;}
- bump(user,resource){
-  if(!['favorites','gallery'].includes(resource))throw Error('Unknown resource');
-  this.db.prepare('INSERT OR IGNORE INTO resource_revisions(user) VALUES(?)').run(user);
-  this.db.prepare(`UPDATE resource_revisions SET ${resource}=${resource}+1 WHERE user=?`).run(user);
- }
  #gallerySnapshot(user){return {images:this.listImages(user),revision:this.revision(user,'gallery')};}
  gallerySnapshot(user){return this.tx(()=>this.#gallerySnapshot(user));}
  #favoritesSnapshot(user){const ids=this.favorites(user);return {ids:ids??[],initialized:ids!==null,revision:this.revision(user,'favorites')};}
@@ -142,7 +169,7 @@ export class AuthStore{
  listImages(user){return this.db.prepare('SELECT id,name,style,created,size FROM gallery WHERE user=? ORDER BY created DESC,rowid DESC').all(user);}
  image(user,id){return this.db.prepare('SELECT name,style,created,size,bytes FROM gallery WHERE id=? AND user=?').get(id,user)||null;}
  deleteImage(user,id){return this.deleteImageSnapshot(user,id).deleted;}
- deleteImageSnapshot(user,id){return this.tx(()=>{const deleted=this.db.prepare('DELETE FROM gallery WHERE id=? AND user=?').run(id,user).changes>0;if(deleted)this.bump(user,'gallery');return {deleted,...this.#gallerySnapshot(user)};});}
+ deleteImageSnapshot(user,id){return this.tx(()=>{const deleted=this.db.prepare('DELETE FROM gallery WHERE id=? AND user=?').run(id,user).changes>0;return {deleted,...this.#gallerySnapshot(user)};});}
  countImages(user){return this.db.prepare('SELECT count(*) n FROM gallery WHERE user=?').get(user).n;}
  // `null` means the account never stored favourites (first sync adopts the local
  // list); `[]` means the account deliberately has none, so the empty list wins.
@@ -150,9 +177,7 @@ export class AuthStore{
   try{const ids=JSON.parse(row.ids);return Array.isArray(ids)?ids.filter(validStyleId).slice(0,FAVORITE_LIMIT):[];}catch{return [];}}
  setFavorites(user,ids){return this.tx(()=>this.#setFavorites(user,ids));}
  #setFavorites(user,ids){
-  const before=this.favorites(user);
   this.db.prepare('INSERT INTO favorites VALUES(?,?,?) ON CONFLICT(user) DO UPDATE SET ids=excluded.ids,updated=excluded.updated').run(user,JSON.stringify(ids),this.now());
-  if(before===null||JSON.stringify(before)!==JSON.stringify(ids))this.bump(user,'favorites');
  }
  // Adopting this device's list is only allowed while the account has no list of
  // its own. Afterwards every change is one atomic add/remove on the server's

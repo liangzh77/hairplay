@@ -75,7 +75,7 @@ test('legacy session/gallery/favorites migration retains data and stable public 
  const {store,path}=fixture(t),token=login(store),user=store.session(token);
  store.setFavorites(user.id,['dracula']);const saved=store.addImage(user.id,{name:'legacy'},picture);
  // Reconstruct the actual predecessor columns, not only an empty mock database.
- store.db.exec('DROP TABLE resource_revisions; ALTER TABLE sessions DROP COLUMN context;');
+ store.db.exec('DROP TABLE resource_revisions; DROP TABLE session_contexts;');
  const upgraded=new AuthStore(path);t.after(()=>upgraded.close());
  const next=upgraded.session(token);assert.equal(next.id,user.id);assert.match(next.context,/^[0-9a-f]{32}$/);
  assert.equal(upgraded.favoritesSnapshot(user.id).revision,1);assert.equal(upgraded.gallerySnapshot(user.id).revision,1);
