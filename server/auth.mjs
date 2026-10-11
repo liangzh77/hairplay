@@ -1,13 +1,14 @@
 import {DatabaseSync} from 'node:sqlite';
 import {mkdirSync,chmodSync,statSync,lstatSync,openSync,closeSync} from 'node:fs';
 import {dirname,resolve} from 'node:path';
-import {randomBytes,randomInt,createHmac,timingSafeEqual} from 'node:crypto';
+import {randomBytes,randomInt,createHash,createHmac,timingSafeEqual} from 'node:crypto';
 export const normalizeEmail=v=>typeof v==='string'?v.trim().toLowerCase():'';
 export const validEmail=email=>typeof email==='string'&&email.length<=254&&/^[a-z0-9.!#$%&'*+\/?=^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,63}$/.test(email);
 export const validGender=gender=>gender===null||gender==='male'||gender==='female';
-// Cloud copies of generated pictures. The lifetime generation quota already caps
-// generated images at 3 per account; this cap bounds the import path (pictures a
-// user generated before the cloud copy existed, or on another device offline).
+// Cloud copies of generated pictures. Imports do not consume the lifetime
+// generation quota, so the album size cannot be inferred from it: this cap is
+// enforced for both paths, which is the only way "the cloud album never exceeds
+// the quota" stays true for an account that imported pictures as well.
 export const GALLERY_LIMIT=3;
 export const GALLERY_MAX_BYTES=4*1024*1024;
 // Style ids the client may favourite; anything else is refused, so a stolen
@@ -30,14 +31,18 @@ export class AuthStore{
    CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY,user INTEGER NOT NULL,expires INTEGER NOT NULL);
    CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,user INTEGER NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL);
    CREATE INDEX IF NOT EXISTS jobs_user ON jobs(user,state);
-   CREATE TABLE IF NOT EXISTS gallery(id TEXT PRIMARY KEY,user INTEGER NOT NULL,name TEXT NOT NULL,style TEXT,created INTEGER NOT NULL,size INTEGER NOT NULL,bytes BLOB NOT NULL);
+   CREATE TABLE IF NOT EXISTS gallery(id TEXT PRIMARY KEY,user INTEGER NOT NULL,name TEXT NOT NULL,style TEXT,created INTEGER NOT NULL,size INTEGER NOT NULL,bytes BLOB NOT NULL,hash TEXT);
    CREATE INDEX IF NOT EXISTS gallery_user ON gallery(user,created);
+   CREATE INDEX IF NOT EXISTS gallery_user_hash ON gallery(user,hash);
    CREATE TABLE IF NOT EXISTS favorites(user INTEGER PRIMARY KEY,ids TEXT NOT NULL,updated INTEGER NOT NULL);
   `);
   // Serialize check + migration across processes; legacy rows keep gender NULL.
   this.db.exec('BEGIN IMMEDIATE');
   try{
    if(!this.db.prepare('PRAGMA table_info(users)').all().some(col=>col.name==='gender'))this.db.exec("ALTER TABLE users ADD COLUMN gender TEXT CHECK(gender IN ('male','female') OR gender IS NULL)");
+   // The content hash is what makes an import idempotent; older databases (a
+   // rehearsal, or a release from before the column existed) are migrated here.
+   if(!this.db.prepare('PRAGMA table_info(gallery)').all().some(col=>col.name==='hash'))this.db.exec('ALTER TABLE gallery ADD COLUMN hash TEXT');
    this.db.exec('COMMIT');
   }catch(e){this.db.exec('ROLLBACK');throw e;}
   this.db.prepare('INSERT OR IGNORE INTO meta VALUES (?,?)').run('pepper',randomBytes(32).toString('hex'));
@@ -88,21 +93,29 @@ export class AuthStore{
  finish(id,ok){this.db.prepare("UPDATE jobs SET state=? WHERE id=? AND state='pending'").run(ok?'success':'failed',id);}
  // The stored picture and the consumed quota are one commit: a successful
  // generation is never charged without its cloud copy, and a rolled back insert
- // (bad bytes, full disk) leaves the job pending so `finish(id,false)` refunds it.
- // `limit` is 0 for the generation path (the lifetime quota already bounds it).
- #addImage(user,meta,bytes,limit){
+ // (bad bytes, full disk, full album) leaves the job pending so `finish(id,false)`
+ // refunds the quota. The cap applies to this path too — a generation must not be
+ // the fourth row of an account that spent its three slots on imports.
+ #addImage(user,meta,bytes){
   if(!Buffer.isBuffer(bytes)||bytes.length<1024||bytes.length>GALLERY_MAX_BYTES)throw Object.assign(Error('图片大小无效'),{status:400});
-  if(limit&&this.db.prepare('SELECT count(*) n FROM gallery WHERE user=?').get(user).n>=limit)throw Object.assign(Error('云端相册最多保存 '+limit+' 张，请先删除一张'),{status:429});
+  // Identical bytes are the same picture: a retry after a failed local cache
+  // write, or a second tap on「同步到云端」, must return the existing row instead
+  // of spending another slot or filling the album with duplicates.
+  const hash=createHash('sha256').update(bytes).digest('hex');
+  const seen=this.db.prepare('SELECT id,created FROM gallery WHERE user=? AND hash=?').get(user,hash);
+  if(seen)return {id:seen.id,created:seen.created};
+  if(this.db.prepare('SELECT count(*) n FROM gallery WHERE user=?').get(user).n>=GALLERY_LIMIT)throw Object.assign(Error('云端相册最多保存 '+GALLERY_LIMIT+' 张图片，请先删除一张再试'),{status:429});
   const id=randomBytes(12).toString('hex'),created=this.now();
-  this.db.prepare('INSERT INTO gallery VALUES(?,?,?,?,?,?,?)').run(id,user,String(meta?.name||'AI 发型').slice(0,60)||'AI 发型',validStyleId(meta?.style)?meta.style:null,created,bytes.length,bytes);
+  this.db.prepare('INSERT INTO gallery VALUES(?,?,?,?,?,?,?,?)').run(id,user,String(meta?.name||'AI 发型').slice(0,60)||'AI 发型',validStyleId(meta?.style)?meta.style:null,created,bytes.length,bytes,hash);
   return {id,created};
  }
  finishWithImage(id,meta,bytes){return this.tx(()=>{
   const row=this.db.prepare("SELECT user FROM jobs WHERE id=? AND state='pending'").get(id);
   if(!row)return null;
+  const saved=this.#addImage(row.user,meta,bytes);
   this.db.prepare("UPDATE jobs SET state='success' WHERE id=? AND state='pending'").run(id);
-  return this.#addImage(row.user,meta,bytes,0);});}
- addImage(user,meta,bytes){return this.tx(()=>this.#addImage(user,meta,bytes,GALLERY_LIMIT));}
+  return saved;});}
+ addImage(user,meta,bytes){return this.tx(()=>this.#addImage(user,meta,bytes));}
  // Newest first; picture ids are random, so the rowid (insertion order) is the
  // tie-break: two pictures added in the same millisecond must not swap order
  // between reloads.
@@ -115,5 +128,22 @@ export class AuthStore{
  favorites(user){const row=this.db.prepare('SELECT ids FROM favorites WHERE user=?').get(user);if(!row)return null;
   try{const ids=JSON.parse(row.ids);return Array.isArray(ids)?ids.filter(validStyleId).slice(0,FAVORITE_LIMIT):[];}catch{return [];}}
  setFavorites(user,ids){this.db.prepare('INSERT INTO favorites VALUES(?,?,?) ON CONFLICT(user) DO UPDATE SET ids=excluded.ids,updated=excluded.updated').run(user,JSON.stringify(ids),this.now());}
+ // Adopting this device's list is only allowed while the account has no list of
+ // its own. Afterwards every change is one atomic add/remove on the server's
+ // current list, so two devices editing from stale snapshots cannot resurrect a
+ // favourite the other one just removed.
+ adoptFavorites(user,ids){return this.tx(()=>{
+  if(this.db.prepare('SELECT ids FROM favorites WHERE user=?').get(user))return {ids:this.favorites(user)??[],conflict:true};
+  const unique=[...new Set(ids)].slice(0,FAVORITE_LIMIT);this.setFavorites(user,unique);return {ids:unique,conflict:false};});}
+ addFavorite(user,styleId){return this.tx(()=>{
+  const current=this.favorites(user)??[];
+  if(current.includes(styleId))return {ids:current};
+  if(current.length>=FAVORITE_LIMIT)throw Object.assign(Error('最多收藏 '+FAVORITE_LIMIT+' 个模板，请先取消一个'),{status:429});
+  const ids=[styleId,...current];this.setFavorites(user,ids);return {ids};});}
+ removeFavorite(user,styleId){return this.tx(()=>{
+  const current=this.favorites(user)??[],ids=current.filter(id=>id!==styleId);
+  // The row is written even when nothing changed, so the removal is recorded for
+  // the other devices instead of leaving the account "never synced".
+  this.setFavorites(user,ids);return {ids};});}
  close(){this.db.close();}
 }

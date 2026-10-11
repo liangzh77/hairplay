@@ -5,7 +5,7 @@ import {readFileSync} from 'node:fs';
 const jpegB64=readFileSync(new URL('../src/static/catalog/ai-catalog-44-0.jpg',import.meta.url)).toString('base64');
 const jpegPayload='data:image/jpeg;base64,'+jpegB64;
 const fakePayload='data:image/jpeg;base64,/9j/'+'A'.repeat(2_000);
-import {catalog,categories,filterStyles,heroStyleFor,initialState,decodeState,validatePhoto,makeSavedStyle,isSavedStyle,decodeFavorites,insertFavorite,removeFavorites,FAVORITE_LIMIT,makeGeneratedRecord,decodeGenerations,removeGenerations,insertGeneration,isValidGeneratedImage,jpegEndsWithEoi,jpegHasSegments,GENERATION_LIMIT,GENERATION_IMAGE_MAX,type GeneratedRecord} from '../src/core/model';
+import {catalog,categories,filterStyles,heroStyleFor,initialState,decodeState,validatePhoto,makeSavedStyle,isSavedStyle,decodeFavorites,insertFavorite,removeFavorites,FAVORITE_LIMIT,makeGeneratedRecord,decodeGenerations,removeGenerations,insertGeneration,isValidGeneratedImage,jpegEndsWithEoi,jpegHasSegments,GENERATION_LIMIT,GENERATION_IMAGE_MAX,CLOUD_LIMIT,isGeneratedRecord,type GeneratedRecord} from '../src/core/model';
 test('observed catalog and filtering',()=>{assert.equal(catalog.length,27);assert.equal(categories.length,14);for(const c of categories.slice(1))assert.ok(filterStyles(c,'').length>0,c);assert.equal(filterStyles('男士',' 庞巴杜 ').length,1);assert.equal(filterStyles('男士','no matching result').length,0);assert.equal(filterStyles('所有风格','').length,catalog.length);});
 test('all-styles hero follows stored gender, unknown defaults to female example',()=>{
  assert.deepEqual([heroStyleFor('male').id,heroStyleFor('female').id,heroStyleFor(null).id,heroStyleFor(undefined).id],['catalog-54-1','catalog-44-1','catalog-44-1','catalog-44-1']);
@@ -97,11 +97,19 @@ test('AI generations are cloud-linked, jpeg-only, bounded and removable',()=>{
  assert.equal(makeGeneratedRecord('x',payload).cloud,undefined);
  assert.equal(makeGeneratedRecord('x',payload,'a'.repeat(24)).cloud,'a'.repeat(24));
  for(const bad of ['a'.repeat(23),'A'.repeat(24),'gen-1','',null])assert.equal(makeGeneratedRecord('x',payload,bad as string|undefined).cloud,undefined);
+ // Only a string can be a cloud id: a JSON array that stringifies to a valid id
+ // must not slip through a regex test that coerces its input.
+ assert.equal(makeGeneratedRecord('x',payload,['0123456789abcdef01234567'] as unknown as string).cloud,undefined);
+ assert.equal(makeGeneratedRecord('x',payload,{toString:()=>'0123456789abcdef01234567'} as unknown as string).cloud,undefined);
+ assert.equal(CLOUD_LIMIT,3);
  const linked=makeGeneratedRecord('x',payload,'0123456789abcdef01234567');
  assert.deepEqual(decodeGenerations([linked]),[linked]);
  // A stored pointer that is not a server id is dropped, but the cached picture stays.
  const {cloud:_,...withoutCloud}=linked;
  assert.deepEqual(decodeGenerations([{...linked,cloud:'nope'}]),[withoutCloud]);
+ assert.deepEqual(decodeGenerations([{...linked,cloud:['0123456789abcdef01234567']}]),[withoutCloud]);
+ assert.equal(isGeneratedRecord({...record,cloud:['0123456789abcdef01234567']}),false);
+ assert.equal(isGeneratedRecord({...record,cloud:'0123456789abcdef01234567'}),true);
  const inserted=insertGeneration([{...record,id:'gen-old'}],{...record,id:'gen-new'});
  assert.equal(inserted[0].id,'gen-new');assert.equal(inserted.length,2);
  let full:GeneratedRecord[]=[record];for(let i=0;i<GENERATION_LIMIT+3;i++)full=insertGeneration(full,{...record,id:`gen-${i + 100}`});

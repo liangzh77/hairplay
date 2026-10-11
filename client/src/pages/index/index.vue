@@ -3,20 +3,40 @@ import {computed,nextTick,onMounted,onUnmounted,ref,watch} from 'vue';
 import {assetUrl} from '../../core/assets';
 import {loginRequest} from '../../core/login';
 import {onBackPress} from '@dcloudio/uni-app';
-import {catalog,categories,filterStyles,heroStyleFor,makeGeneratedRecord,insertGeneration,makeSavedStyle,insertFavorite,removeFavorites,FAVORITE_LIMIT,type Style,type SavedStyle,type GeneratedRecord} from '../../core/model';
-import {loadState,storeState,pickPhoto,generateLiveImage,releasePhoto,lockModal,setupEscape,setupBack,pushLocalHistory,backLocalHistory,downloadStyle,capsuleInset,setupModalKeyboard,setupImageCache,loadGenerations,mutateGenerations,withStorageLock,prepareGeneratedImage,downloadGenerated,verifyGeneratedImage,accountApi,cloudAlbum,cloudImageData,cloudDelete,cloudImport,cloudFavorites,cloudSaveFavorites,downloadCloudImage,type Account,type CloudImage,type Gender,type Photo} from '../../platform';
+import {catalog,categories,filterStyles,heroStyleFor,makeGeneratedRecord,insertGeneration,makeSavedStyle,insertFavorite,removeFavorites,FAVORITE_LIMIT,CLOUD_LIMIT,type Style,type SavedStyle,type GeneratedRecord} from '../../core/model';
+import {loadState,storeState,pickPhoto,generateLiveImage,releasePhoto,lockModal,setupEscape,setupBack,pushLocalHistory,backLocalHistory,downloadStyle,capsuleInset,setupModalKeyboard,setupImageCache,loadGenerations,mutateGenerations,withStorageLock,prepareGeneratedImage,downloadGenerated,verifyGeneratedImage,accountApi,cloudAlbum,cloudImageData,cloudDelete,cloudImport,cloudFavorites,cloudSaveFavorites,cloudEditFavorite,mutateState,downloadCloudImage,type Account,type CloudImage,type Gender,type Photo} from '../../platform';
 // The album mixes two kinds of row: pictures that live in the account (the
 // server list is authoritative, the browser keeps a downscaled cache) and
 // pictures that only exist on this device (generated before cloud storage, or
 // kept after signing out). `cloud` marks the former.
 interface AlbumItem {id:string;name:string;created:string;image:string;cloud?:string}
 const state=ref(loadState());const generations=ref<GeneratedRecord[]>(loadGenerations());const cloudImages=ref<CloudImage[]|null>(null);const cloudMessage=ref('');const favoriteMessage=ref('');const tab=ref('发现');const category=ref('所有风格');const query=ref('');const detail=ref<Style|null>(null);const favoriteDetail=ref<SavedStyle|null>(null);const generatedDetail=ref<AlbumItem|null>(null);const generationSaved=ref(true);const liveName=ref('');const photo=ref<Photo|null>(null);const picking=ref(false);const error=ref('');const notice=ref('');const loading=ref(false);const advanced=ref(false);const requirements=ref('');const color=ref('保持原色');const modal=ref('');const info=ref('');const selectMode=ref(false);const selected=ref<string[]>([]);const scrollTop=ref(0);let rememberedScroll=0;let currentScroll=0;
+// Account-scoped state must not survive a sign-in/sign-out. `accountEpoch` makes a
+// response that arrives after the account changed unusable, `memoryImages` holds
+// cloud pictures downloaded but not writable to this device's storage (they still
+// render), and `importedPointers` links a picture imported in this session to its
+// account copy when the local cache write failed.
+let accountEpoch=0;
+const memoryImages=ref<Record<string,string>>({});
+const importedPointers=ref<Record<string,string>>({});
 const album=computed<AlbumItem[]>(()=>{
  const cached=new Map(generations.value.filter(r=>r.cloud).map(r=>[r.cloud as string,r]));
- const list:AlbumItem[]=(cloudImages.value||[]).map(img=>({id:img.id,name:img.name,created:img.created,cloud:img.id,image:cached.get(img.id)?.image||''}));
- // A cached picture whose cloud copy is gone — deleted on another device — is
- // deliberately absent from the account list and therefore absent here too.
- for(const r of generations.value)if(!r.cloud)list.push({id:r.id,name:r.name,created:r.created,image:r.image});
+ // Only the account list produces an account row: a picture deleted on another
+ // device is absent here even though this browser still holds a copy, and while
+ // signed out the account contributes nothing at all.
+ // A freshly downloaded, verified copy wins over a cached one: `memoryImages` is
+ // only ever filled with bytes that passed verification while the local write was
+ // refused, so it can never be a downgrade of what the cache holds.
+ const list:AlbumItem[]=(account.value&&cloudImages.value?cloudImages.value:[]).map(img=>({id:img.id,name:img.name,created:img.created,cloud:img.id,image:memoryImages.value[img.id]||cached.get(img.id)?.image||''}));
+ for(const r of generations.value){
+  if(r.cloud)continue;
+  const linked=importedPointers.value[r.id];
+  if(!linked){list.push({id:r.id,name:r.name,created:r.created,image:r.image});continue;}
+  // Imported in this session but not linked in storage yet: show the one row that
+  // belongs to the account copy instead of a local duplicate of it.
+  if(account.value){if(!list.some(i=>i.cloud===linked))list.push({id:r.id,name:r.name,created:r.created,cloud:linked,image:r.image});}
+  else list.push({id:r.id,name:r.name,created:r.created,image:r.image});
+ }
  return list.sort((a,b)=>b.created.localeCompare(a.created));
 });
 const account=ref<Account|null>(null);const signupGender=ref<Gender>(null);const email=ref('');const code=ref('');const authBusy=ref(false);const authMessage=ref('');const cooldown=ref(0);let cooldownTimer:ReturnType<typeof setInterval>|undefined;let stopImageCache=()=>{};
@@ -50,6 +70,9 @@ async function authAction(action:'code'|'login'|'logout'){if(authBusy.value||(ac
  email.value=shownEmail;code.value=shownCode;
  if(action==='login'&&signupGender.value)body.gender=signupGender.value;
  authBusy.value=true;try{
+ // The account is about to change, so anything still in flight belongs to the
+ // account the user is leaving: make it unusable before it can be applied.
+ if(action!=='code'){accountEpoch+=1;cloudImages.value=null;memoryImages.value={};importedPointers.value={};}
  await accountApi('auth/'+action,body);
  if(action==='code'){authMessage.value='验证码发送请求已受理，请查看收件箱和垃圾箱；10分钟内有效。';cooldown.value=60;clearInterval(cooldownTimer);cooldownTimer=setInterval(()=>{cooldown.value--;if(cooldown.value<=0)clearInterval(cooldownTimer);},1000);}
  else{code.value='';lastTyped.code=null;if(!await refreshAccount())return;
@@ -76,69 +99,106 @@ async function commitGenerations(mutate:(list:GeneratedRecord[])=>GeneratedRecor
  const result=await mutateGenerations(mutate);generations.value=loadGenerations();
  return result.ok?{ok:true,message:''}:{ok:false,message:result.message||'本机相册写入未生效，请检查本机存储空间后重试。'};}
 // Favourites are signed-in state too: the account list is authoritative, so a
-// signed-in change writes the server first and caches the server's answer. Only
-// an anonymous list is a local read-modify-write, and it uses the same locked
-// read-back loop as the generated list, so another tab cannot resurrect a
-// favourite that was just removed.
-function sameStyleIds(a:SavedStyle[],b:SavedStyle[]){return a.length===b.length&&a.every((f,i)=>f.styleId===b[i].styleId);}
+// signed-in change writes the server first and caches the server's answer. The
+// edit is one atomic add/remove on the server's current list, so a concurrent
+// removal on another device can no longer be undone by this device's stale
+// snapshot. An anonymous list is a local read-modify-write through the same
+// locked read-back helper as the pictures.
 function orderFavorites(ids:string[],local:SavedStyle[]):SavedStyle[]{
  return ids.map(id=>local.find(f=>f.styleId===id)||catalog.map(s=>[s] as const).find(([s])=>s.id===id)?.[0]).filter((s):s is Style|SavedStyle=>!!s).map(s=>'styleId' in s?s:makeSavedStyle(s));
 }
-async function updateFavorites(mutate:(list:SavedStyle[])=>SavedStyle[]):Promise<{ok:boolean;message:string}>{
+async function updateFavorites(style:Style,add:boolean):Promise<{ok:boolean;message:string}>{
+ const label=add?`已收藏「${style.name}」`:`已取消收藏「${style.name}」`;
  if(account.value){
-  const next=mutate(state.value.favorites);
-  if(next.length>FAVORITE_LIMIT)return {ok:false,message:`最多收藏 ${FAVORITE_LIMIT} 个模板，请先取消一个。`};
-  try{const saved=await cloudSaveFavorites(next.map(f=>f.styleId));state.value={...state.value,favorites:orderFavorites(saved,next)};favoriteMessage.value=persist()?'':'本机存储空间不足，收藏未缓存到本机（账户中已保存）。';return {ok:true,message:''};}
+  let ids:string[];
+  try{ids=await cloudEditFavorite(add?'add':'remove',style.id);}
   catch(e){return {ok:false,message:e instanceof Error?e.message:'收藏未保存，请稍后重试。'};}
+  const next=orderFavorites(ids,state.value.favorites);
+  const written=await mutateState(latest=>({...latest,favorites:next}));
+  // The account edit is what the user asked for; a cache that could not be
+  // written is reported but never treated as the edit having failed.
+  state.value=written.ok?loadState():{...loadState(),favorites:next};
+  return written.ok?{ok:true,message:label}:{ok:false,message:`${label}（账户中已生效），但本机缓存未更新：${written.message}`};
  }
- try{return await withStorageLock('hairai.study.v1',()=>{
-  for(let attempt=0;attempt<5;attempt++){
-   const latest=loadState(),next=mutate(latest.favorites);
-   if(next.length>FAVORITE_LIMIT)return {ok:false,message:`最多收藏 ${FAVORITE_LIMIT} 个模板，请先取消一个。`};
-   state.value={...latest,favorites:next};
-   const writeError=persist()?'':(error.value||'本机收藏写入失败');
-   const after=loadState();state.value=after;error.value=writeError;
-   if(sameStyleIds(after.favorites,next))return {ok:true,message:''};
-   if(writeError)return {ok:false,message:writeError};
-  }
-  return {ok:false,message:'另一个标签页同时改动了收藏，本次操作未生效，请重试。'};});}
- catch(e){return {ok:false,message:e instanceof Error&&e.message?e.message:'收藏未保存，请稍后重试。'};}}
+ let over=false;
+ const written=await mutateState(latest=>{
+  const next=add?insertFavorite(latest.favorites,style):removeFavorites(latest.favorites,[style.id]);
+  if(next.length>FAVORITE_LIMIT){over=true;return latest;}
+  return {...latest,favorites:next};});
+ state.value=loadState();
+ if(over)return {ok:false,message:`最多收藏 ${FAVORITE_LIMIT} 个模板，请先取消一个。`};
+ return written.ok?{ok:true,message:`${label}（未登录，仅保存在本机）`}:{ok:false,message:written.message};
+}
 function isFavorite(styleId:string){return state.value.favorites.some(f=>f.styleId===styleId);}
 async function toggleFavorite(style:Style){if(loading.value)return;
  const on=isFavorite(style.id);
  if(!on&&state.value.favorites.length>=FAVORITE_LIMIT){error.value=`最多收藏 ${FAVORITE_LIMIT} 个模板，请先取消一个。`;return;}
- const {ok,message}=await updateFavorites(list=>on?removeFavorites(list,[style.id]):insertFavorite(list,style));
+ const {ok,message}=await updateFavorites(style,!on);
  if(!ok){error.value=message;return;}
- error.value='';
- notice.value=on?`已取消收藏「${style.name}」`:`已收藏「${style.name}」${account.value?'':'（未登录，仅保存在本机）'}`;}
+ error.value='';notice.value=message;}
 // The account list wins once it exists. A brand new account adopts whatever the
-// device already collected, so the very first sign-in never loses favourites.
+// device already collected, so the very first sign-in never loses favourites; if
+// another device stored a list first, the server answers 409 and that list is
+// the one adopted here.
 async function syncFavoritesWithAccount(){
  if(!account.value)return;
+ const epoch=accountEpoch;
  try{const {ids,initialized}=await cloudFavorites();
-  const wanted=initialized?ids:state.value.favorites.map(f=>f.styleId);
-  const saved=initialized?ids:await cloudSaveFavorites(wanted);
-  state.value={...state.value,favorites:orderFavorites(saved,state.value.favorites)};
-  favoriteMessage.value=persist()?'':'本机存储空间不足，收藏未缓存到本机。';}
- catch(e){favoriteMessage.value=e instanceof Error?`收藏暂未同步：${e.message}`:'收藏暂未同步';}}
+  if(epoch!==accountEpoch||!account.value)return;
+  let wanted=ids;
+  if(!initialized){const adopted=await cloudSaveFavorites(state.value.favorites.map(f=>f.styleId));
+   if(epoch!==accountEpoch||!account.value)return;
+   wanted=adopted.ids;
+   favoriteMessage.value=adopted.conflict?'账户中已有收藏列表，已采用账户中的列表。':'';}
+  const next=orderFavorites(wanted,state.value.favorites);
+  const written=await mutateState(latest=>({...latest,favorites:next}));
+  if(epoch!==accountEpoch)return;
+  // Even when the local cache refuses the write, show the account's list: it is
+  // the truth, and the notice says the copy on this device is stale.
+  state.value=written.ok?loadState():{...loadState(),favorites:next};
+  favoriteMessage.value=written.ok?'':`收藏已从账户同步，但本机缓存未更新：${written.message}`;}
+ catch(e){if(epoch===accountEpoch)favoriteMessage.value=e instanceof Error?`收藏暂未同步：${e.message}`:'收藏暂未同步';}}
 // The account album is authoritative; a picture that is not in it was deleted on
-// another device and must not be re-shown from this browser's cache.
+// another device and must not be re-shown from this browser's cache. A response
+// that arrives after signing out belongs to the account the user left and is
+// dropped instead of replacing the signed-out view.
 async function syncCloudAlbum(){
  if(!account.value)return;
- try{const images=await cloudAlbum();cloudImages.value=images;cloudMessage.value='';
+ const epoch=accountEpoch;
+ try{const images=await cloudAlbum();
+  if(epoch!==accountEpoch||!account.value)return;
+  cloudImages.value=images;cloudMessage.value='';
   const live=new Set(images.map(i=>i.id));
   if(generations.value.some(r=>r.cloud&&!live.has(r.cloud)))await commitGenerations(list=>list.filter(r=>!r.cloud||live.has(r.cloud)));
-  void cacheCloudImages(images);}
- catch(e){cloudMessage.value=e instanceof Error?`云端相册暂未同步：${e.message}`:'云端相册暂未同步';}}
+  void cacheCloudImages(images,epoch);}
+ catch(e){if(epoch===accountEpoch&&account.value)cloudMessage.value=e instanceof Error?`云端相册暂未同步：${e.message}`:'云端相册暂未同步';}}
 // The 2K original stays on the server; the browser caches a downscaled copy so
-// the gallery renders instantly (and still renders when the network is down).
-async function cacheCloudImages(images:CloudImage[]){
+// the gallery renders instantly (and still renders when the network is down). A
+// cached copy that no longer decodes is downloaded again rather than shown as a
+// broken image, and a copy that cannot be written to this device's storage is
+// still rendered from memory — refusing the persistent write must not hide a
+// picture the account does hold.
+async function cacheCloudImages(images:CloudImage[],epoch:number){
  for(const img of images){
-  if(generations.value.some(r=>r.cloud===img.id))continue;
-  try{const raw=await cloudImageData(img.id);const stored=await prepareGeneratedImage(raw);
-   if(!await verifyGeneratedImage(stored)){cloudMessage.value='云端图片无法在本机显示，图片仍保存在账户中。';continue;}
-   await commitGenerations(list=>list.some(r=>r.cloud===img.id)?list:insertGeneration(list,makeGeneratedRecord(img.name,stored,img.id)));}
-  catch{cloudMessage.value='云端原图暂未缓存到本机；图片仍保存在您的账户中。';}}
+  if(epoch!==accountEpoch||!account.value)return;
+  const cached=generations.value.find(r=>r.cloud===img.id);
+  if(cached&&await verifyGeneratedImage(cached.image))continue;
+  let stored='';
+  try{const raw=await cloudImageData(img.id);stored=await prepareGeneratedImage(raw);
+   if(!await verifyGeneratedImage(stored))stored='';}
+  catch(e){if(epoch===accountEpoch)cloudMessage.value=e instanceof Error?`云端原图暂未缓存到本机（${e.message}）；图片仍保存在您的账户中。`:'云端原图暂未缓存到本机；图片仍保存在您的账户中。';continue;}
+  if(!stored){if(epoch===accountEpoch)cloudMessage.value='云端返回的图片无法在本机显示，图片仍保存在账户中。';continue;}
+  if(epoch!==accountEpoch||!account.value)return;
+  const {ok,message}=await commitGenerations(list=>{
+   const at=list.findIndex(r=>r.cloud===img.id);
+   // A cached copy that no longer decodes must be REPLACED, not kept: leaving the
+   // broken bytes in place would keep rendering a picture the browser cannot show.
+   if(at<0)return insertGeneration(list,makeGeneratedRecord(img.name,stored,img.id));
+   const next=[...list];next[at]={...list[at],name:img.name,image:stored};return next;});
+  if(epoch!==accountEpoch)return;
+  if(ok)memoryImages.value=Object.fromEntries(Object.entries(memoryImages.value).filter(([id])=>id!==img.id));
+  else{memoryImages.value={...memoryImages.value,[img.id]:stored};cloudMessage.value=`云端图片已下载，但本机缓存未能写入：${message}可打开这张图片用「下载云端原图」保存到本机。`;}
+ }
 }
 function albumItemFor(id:string){return album.value.find(i=>i.id===id);}
 // Deleting a cloud picture removes it from the account, then from this browser's
@@ -175,7 +235,9 @@ onBackPress(()=>{if(modal.value||inDetail.value){goBack();return true;}return fa
 onUnmounted(()=>{stopBack();stopEscape();stopModalKeyboard();releasePhoto(photo.value);lockModal(false);});
 async function choose(){error.value='';try{const picked=await pickPhoto(()=>{picking.value=true;});if(picked){releasePhoto(photo.value);photo.value=picked;liveImage.value='';}}catch(e){error.value=e instanceof Error?e.message:'照片无法读取，请重试';}finally{picking.value=false;}}
 function removePhoto(){releasePhoto(photo.value);photo.value=null;liveImage.value='';}
-function start(){error.value='';if(!account.value){error.value='请先到「个人资料」用邮箱登录；登录后每个账户终身可成功生成 3 张。';return;}if(account.value.remaining===0){error.value='账户终身 3 张成功生成额度已用完';return;}// A photo still being read is not a missing photo: pickPhoto() only sets it once the picture has been decoded and measured.
+function start(){error.value='';if(!account.value){error.value='请先到「个人资料」用邮箱登录；登录后每个账户终身可成功生成 3 张。';return;}if(account.value.remaining===0){error.value='账户终身 3 张成功生成额度已用完';return;}// The account album is capped too, and a refused generation must not spend the
+ // account's lifetime quota: ask the user to free a slot before uploading.
+ if((cloudImages.value?.length||0)>=CLOUD_LIMIT){error.value=`云端相册已满（最多 ${CLOUD_LIMIT} 张），请先到「画廊」删除一张再生成；本次不会消耗额度。`;return;}// A photo still being read is not a missing photo: pickPhoto() only sets it once the picture has been decoded and measured.
  if(picking.value){error.value='照片正在读取，请稍候再试';return;}if(!photo.value){error.value='请先上传您的照片';return;}modal.value='confirmUpload';}
 async function generate(){closeModal();loading.value=true;liveImage.value='';error.value='';try{
  if(!photo.value)throw new Error('请先上传您的照片');
@@ -222,12 +284,19 @@ async function downloadGeneratedRecord(){const item=generatedDetail.value;if(!it
 async function syncToCloud(item:AlbumItem){if(item.cloud)return;
  if(!account.value){error.value='请先登录再同步到云端。';return;}
  try{const saved=await cloudImport(item.image,item.name);
-  await commitGenerations(list=>list.map(r=>r.id===item.id?{...r,cloud:saved.id}:r));
-  cloudImages.value=[{id:saved.id,name:item.name,style:null,created:saved.created,size:0},...(cloudImages.value||[])];
+  // Remember the link in memory first: when the local cache write fails the
+  // account really does hold the picture, and the album shows one row for it
+  // instead of a local duplicate. The cloud import is content-addressed, so
+  // retrying never stores the same picture twice.
+  importedPointers.value={...importedPointers.value,[item.id]:saved.id};
+  const {ok,message}=await commitGenerations(list=>list.map(r=>r.id===item.id?{...r,cloud:saved.id}:r));
+  cloudImages.value=[{id:saved.id,name:item.name,style:null,created:saved.created,size:0},...(cloudImages.value||[]).filter(i=>i.id!==saved.id)];
   // The detail screen holds a snapshot of the album row, so it must be refreshed
   // to the row that now carries the account id.
   const refreshed=album.value.find(i=>i.cloud===saved.id||i.id===item.id);if(refreshed)generatedDetail.value=refreshed;
-  error.value='';notice.value='已同步到云端账户，换设备登录后也能看到。';}
+  if(ok){error.value='';notice.value='已同步到云端账户，换设备登录后也能看到。';}
+  else{notice.value='';error.value=`图片已保存到云端账户，但本机未能记住它：${message}可以再点一次「同步到云端」重试，云端不会重复保存同一张图片。`;}
+ }
  catch(e){error.value=e instanceof Error?`同步到云端失败：${e.message}`:'同步到云端失败，请稍后重试。';}}
 async function downloadLive(){if(!liveImage.value)return;
  try{await downloadGenerated(liveImage.value,liveName.value||'发型');notice.value='已下载到本机（文件名以 HairPlay-AI 开头）';}catch{notice.value='下载失败，请重试';}
@@ -300,7 +369,7 @@ const heroStyle=computed(()=>heroStyleFor(chosenGender.value));
      <view class="gallery-heading"><text class="page-title">相册</text><button class="outline" :disabled="!album.length" @click="toggleSelect">{{selectMode?'取消':'选择'}}</button></view><text class="description">AI 生成结果和收藏的模板分开管理</text>
      <view class="gallery-section">
       <view class="section-head"><text class="section-title">我的生成</text><text class="count-badge">{{String(album.length).padStart(2,'0')}}</text></view>
-      <text class="muted">{{account?'用您的照片生成的造型，保存在您的云端账户，本机保留缓存；换设备登录后同样可见。上传的原照片不会保存。':'用您的照片生成的造型，目前只保存在本机浏览器；登录后可在其它设备查看。'}}</text>
+      <text class="muted">{{account?'用您的照片生成的造型，保存在您的云端账户，本机保留缓存；换设备登录后同样可见。未登录时不显示云端相册，上传的原照片不会保存。':'这里显示的是只保存在本机浏览器的生成记录；登录后可在其它设备查看账户中的相册。'}}</text>
       <button v-if="!account" class="outline wide" @click="switchTab('个人资料')">登录后保存到云端</button>
       <view v-if="!album.length" class="empty-mini"><text class="empty-title">还没有 AI 生成记录</text><text class="muted">在「AI匹配」上传照片并生成后，会自动保存到这里</text><button class="outline" @click="switchTab('AI匹配')">去生成</button></view>
       <view v-else class="gallery-grid"><button v-for="g in album" :key="g.id" class="gallery-card" :aria-label="'AI 生成记录 '+g.name" @click="openGenerated(g)"><image v-if="g.image" :src="g.image" mode="aspectFill" /><view v-else class="image-pending"><text>正在从云端下载…</text></view><text v-if="selectMode" class="selection">{{selected.includes(g.id)?'☑':'□'}}</text><text class="card-badge ai">{{g.cloud?'AI 生成 · 云端':'AI 生成 · 仅本机'}}</text><text>{{g.name}}</text><text class="muted">{{dateOf(g.created)}}</text></button></view>
@@ -369,7 +438,7 @@ const heroStyle=computed(()=>heroStyleFor(chosenGender.value));
     <template v-else-if="modal==='liveResult'&&liveImage"><text class="modal-title">AI 发型试戴 · 结果</text><image class="result-image" :src="liveImage" mode="aspectFit" /><text class="modal-copy">结果可能改变面貌或细节，请自行核对；{{generationSaved?'已保存到相册「我的生成」，可随时删除。':'尚未保存，请先点击「下载这张」。'}}</text><button v-if="!generationSaved" class="gold wide" @click="downloadLive()">下载这张</button><button class="gold wide" @click="closeModal();switchTab('画廊')">查看相册</button><button class="outline wide" @click="closeModal">关闭</button></template>
     <template v-else-if="modal==='delete'"><text class="modal-title">删除所选的 {{selected.length}} 张图片？</text><text class="modal-copy">将从云端账户删除所选图片（同时删除本机缓存）；删除后无法恢复，也不会退回已使用的生成额度。</text><button class="danger wide" @click="deleteSelected">确认删除</button><button class="outline wide" @click="closeModal">取消</button></template>
     <template v-else-if="modal==='deleteGenerated'"><text class="modal-title">删除这张生成图片？</text><text class="modal-copy">将从{{generatedDetail?.cloud?'云端账户和本机缓存':'本机相册'}}删除「{{generatedDetail?.name}}」，删除后无法恢复；不会退回已使用的生成额度。</text><button class="danger wide" @click="deleteGenerated">确认删除</button><button class="outline wide" @click="closeModal">取消</button></template>
-    <template v-else-if="modal==='settings'"><text class="modal-title">隐私与偏好</text><button class="outline wide" @click="toggleRemember">{{state.rememberOptions?'☑':'□'}} 记住高级选项偏好</button><text class="modal-copy">上传的原照片只在生成时发送一次，服务器与本站都不会保存它。AI 生成结果保存在您的云端账户，本机保留一份缓存；删除时会同时删除云端副本。收藏的模板在登录后与账户同步。未登录时两者都只保存在本机浏览器。</text><button class="outline wide" @click="state.bannerHidden=false;persist();notice='邀请横幅已恢复'">恢复邀请横幅</button><button class="gold wide" @click="closeModal">完成</button></template>
+    <template v-else-if="modal==='settings'"><text class="modal-title">隐私与偏好</text><button class="outline wide" @click="toggleRemember">{{state.rememberOptions?'☑':'□'}} 记住高级选项偏好</button><text class="modal-copy">上传的原照片只在生成时发送一次，服务器与本站都不会保存它。登录后，AI 生成结果保存在您的云端账户（删除时会同时删除云端副本），收藏的模板也与账户同步；未登录时不显示云端相册和账户收藏，此时新增的生成记录与收藏只写在本机浏览器，退出登录同样不会删除账户中已有的图片和收藏。任何时候本机都只保留一份缓存副本，真图以账户中的为准。</text><button class="outline wide" @click="state.bannerHidden=false;persist();notice='邀请横幅已恢复'">恢复邀请横幅</button><button class="gold wide" @click="closeModal">完成</button></template>
     <template v-else-if="modal==='language'"><text class="modal-title">选择语言</text><text class="modal-copy">当前：简体中文。其他语言翻译尚未实现，不会假保存为已切换。</text><view class="language-list"><button v-for="lang in ['English','Español','Français','Deutsch','Italiano','Português','简体中文','繁體中文','日本語','한국어','Bahasa Indonesia','Русский']" :key="lang" :disabled="lang!=='简体中文'">{{lang}} {{lang==='简体中文'?'✓ 当前':'· 未实现'}}</button></view><button class="gold wide" @click="closeModal">完成</button><button class="outline wide" @click="closeModal">取消</button></template>
    </view>
   </view>

@@ -45,16 +45,35 @@ export async function mutateGenerations(mutate:(list:GeneratedRecord[])=>Generat
  try{return await withStorageLock(GEN_KEY,()=>{
  let last='';
  for(let attempt=0;attempt<MUTATE_ATTEMPTS;attempt++){
-  const before=loadGenerations(),next=mutate(before);
-  const removed=before.filter(r=>!next.some(n=>n.id===r.id)).map(r=>r.id);
+  const next=mutate(loadGenerations());
   last=storeGenerations(next);
   if(last)return {ok:false,message:last};
-  const after=loadGenerations();
-  const ok=next.every(n=>after.some(r=>r.id===n.id))&&removed.every(id=>!after.some(r=>r.id===id));
-  if(ok)return {ok:true,message:''};
+  // Read back before claiming success: a write another tab overwrote, or one the
+  // storage silently refused, is a failure here and not a silent rollback of what
+  // the user just did. The whole list is compared, not just the ids, because a
+  // lost field update (a cloud link, a replaced image) is a lost write too.
+  if(JSON.stringify(loadGenerations())===JSON.stringify(next))return {ok:true,message:''};
  }
  return {ok:false,message:last||'另一个标签页同时改动了本机相册，本次删除未生效，请重试。'};});}
  catch(e){return {ok:false,message:e instanceof Error&&e.message?e.message:'本机相册写入未生效，请稍后重试。'};}}
+// Preferences and favourites share this device's state blob, so they need the
+// same locked read-modify-write as the generated pictures: a signed-in sync that
+// wrote the cache unlocked could resurrect a favourite another tab just removed.
+// Without Web Locks there is no safe write at all, and the caller reports that
+// honestly instead of pretending the local cache is current.
+export async function mutateState(mutate:(state:State)=>State):Promise<{ok:boolean;message:string}>{
+ try{return await withStorageLock(KEY,()=>{
+ let last='';
+ for(let attempt=0;attempt<MUTATE_ATTEMPTS;attempt++){
+  const next=mutate(loadState());
+  last=storeState(next);
+  if(last)return {ok:false,message:last};
+  // Read back before claiming success: a write another tab overwrote is a
+  // failure here, not a silent rollback of what the user just did.
+  if(JSON.stringify(loadState())===JSON.stringify(next))return {ok:true,message:''};
+ }
+ return {ok:false,message:last||'另一个标签页同时改动了本机设置，本次操作未生效，请重试。'};});}
+ catch(e){return {ok:false,message:e instanceof Error&&e.message?e.message:'本机设置写入未生效，请稍后重试。'};}}
 // Confirm that what we are about to store really is a decodable JPEG, so a
 // broken payload is reported as a failure instead of being written and then
 // silently dropped by the reader.
@@ -100,12 +119,14 @@ export interface Account {email:string;gender:Gender;remaining:number}
 // claim success or blame the user's input for a network/authentication problem:
 // every caller turns these strings into an on-screen failure notice.
 function apiBase(){return import.meta.env.BASE_URL+'api/';}
-async function apiRequest(path:string,init:RequestInit={}):Promise<any>{
+// A conditional write answers 409 with the authoritative list, so the caller must
+// be able to read that body instead of seeing a generic failure message.
+async function apiRequest(path:string,init:RequestInit={},accept:number[]=[200]):Promise<any>{
  // #ifdef H5
  let response:Response;try{response=await fetch(apiBase()+path,{credentials:'same-origin',cache:'no-store',...init});}
  catch{throw Error('无法连接有型服务，请检查网络后重试');}
  const data=await response.json().catch(()=>({error:'服务返回异常'}));
- if(!response.ok)throw Error(typeof data.error==='string'&&data.error?data.error:response.status===401?'登录状态已失效，请重新登录':'服务暂不可用，请稍后重试');
+ if(!response.ok&&!accept.includes(response.status))throw Error(typeof data.error==='string'&&data.error?data.error:response.status===401?'登录状态已失效，请重新登录':'服务暂不可用，请稍后重试');
  return data;
  // #endif
  // #ifdef MP-WEIXIN
@@ -148,12 +169,21 @@ export async function cloudImport(image:string,name:string,styleId?:string):Prom
 }
 export async function cloudFavorites():Promise<{ids:string[];initialized:boolean}>{
  const data=await apiRequest('favorites');
- const ids=Array.isArray(data?.ids)?data.ids.filter((id:unknown)=>typeof id==='string'):[];
- return {ids,initialized:data?.initialized===true};
+ return {ids:styleIds(data?.ids),initialized:data?.initialized===true};
 }
-export async function cloudSaveFavorites(ids:string[]):Promise<string[]>{
- const data=await apiRequest('favorites',jsonPost({ids}));
- return Array.isArray(data?.ids)?data.ids.filter((id:unknown)=>typeof id==='string'):[];
+function styleIds(value:unknown):string[]{return Array.isArray(value)?value.filter((id:unknown):id is string=>typeof id==='string'):[];}
+// Adopting this device's list is only allowed once. A 409 means another device
+// already stored a list, so the answer to adopt is that list, not ours.
+export async function cloudSaveFavorites(ids:string[]):Promise<{ids:string[];conflict:boolean}>{
+ const data=await apiRequest('favorites',jsonPost({ids}),[200,409]);
+ return {ids:styleIds(data?.ids),conflict:data?.ok!==true};
+}
+// One atomic edit on the server's current list: another device's concurrent
+// removal can no longer be undone by this device's stale snapshot.
+export async function cloudEditFavorite(action:'add'|'remove',styleId:string):Promise<string[]>{
+ const data=await apiRequest('favorites',jsonPost({[action]:styleId}));
+ if(!Array.isArray(data?.ids))throw Error('收藏同步返回异常，请稍后重试');
+ return styleIds(data.ids);
 }
 export function setupImageCache():()=>void{
  // #ifdef H5
@@ -299,7 +329,7 @@ export async function downloadStyle(url:string,name:string):Promise<string>{
 // copy. Same-origin with the session cookie, so the anchor download works.
 export async function downloadCloudImage(id:string,name:string):Promise<string>{
  // #ifdef H5
- let response:Response;try{response=await fetch(apiBase()+'gallery/'+id,{credentials:'same-origin'});}catch{throw Error('无法连接有型服务，请检查网络后重试');}
+ let response:Response;try{response=await fetch(apiBase()+'gallery/'+id,{credentials:'same-origin',cache:'no-store'});}catch{throw Error('无法连接有型服务，请检查网络后重试');}
  if(!response.ok)throw Error(response.status===404?'这张图片已不在云端账户中':'云端原图下载失败，请稍后重试');
  const blob=await response.blob();
  if(blob.size<1_024||blob.size>4*1024*1024)throw Error('云端原图大小异常，已取消下载');

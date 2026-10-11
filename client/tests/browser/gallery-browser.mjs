@@ -1,14 +1,17 @@
 // Gallery end to end against a stubbed account API: upload -> generate ->
 // cloud album -> cross-device visibility, detail -> download the 2K original ->
-// delete, favourites synced with the account, and the failure paths (a failed
-// cloud delete, a failed local cache write, an unsigned-out user, invalid
-// payloads, two tabs) that only a real browser can exercise.
+// delete, favourites synced with the account (atomic edits), and the failure
+// paths (a failed cloud delete, a failed local cache write, a stale response that
+// arrives after signing out, a cache that no longer decodes, a browser without
+// Web Locks, concurrent favourite edits, a picture that reaches the account but
+// cannot be linked locally, an unsigned-out user, invalid payloads, two tabs)
+// that only a real browser can exercise.
 //
 // Locator note: index.vue renders notices and errors as `<view class="notice">`
 // / `<view class="error">`, not as `<uni-text>`. Always wait for the observable
 // effect on the element that really renders it.
 import {
-	assert, launchBrowser, readGenerations, readRepo, repoPath, startStatic, STATE_KEY,
+	assert, launchBrowser, readFavorites, readGenerations, readRepo, repoPath, startStatic, STATE_KEY,
 } from './harness.mjs';
 
 const styleJpeg = await readRepo('client/src/static/catalog/ai-catalog-44-1.jpg');
@@ -18,6 +21,18 @@ const photoPath = repoPath('client/src/static/catalog/ai-catalog-44-0.jpg');
 const realJpeg = () => 'data:image/jpeg;base64,' + styleB64;
 const HEX = '0123456789abcdef';
 const newId = () => Array.from({length: 24}, () => HEX[Math.floor(Math.random() * 16)]).join('');
+// A structurally valid JPEG this browser cannot decode: SOI + APP0 + a scan header
+// with no scan data + EOI. `isValidGeneratedImage` accepts it (the cheap gate only
+// requires the /9j/ opening and a real EOI), Chrome's decoder refuses it — exactly
+// the "the cached copy no longer decodes" case the gallery must re-download.
+const undecodableJpeg = () => 'data:image/jpeg;base64,' + Buffer.concat([
+	Buffer.from('ffd8ffe000104a46494600010100000100010000', 'hex'),
+	Buffer.from('ffda0008010100003f00', 'hex'),
+	Buffer.from('ffe00004', 'hex'),
+	Buffer.alloc(1200, 0),
+	Buffer.from('ffd9', 'hex'),
+]).toString('base64');
+const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return {promise, resolve}; };
 
 const json = (res, code, body) => { res.writeHead(code, {'Content-Type': 'application/json'}); res.end(JSON.stringify(body)); };
 const readBody = async req => { let raw = ''; for await (const chunk of req) raw += chunk; try { return JSON.parse(raw) || {}; } catch { return {}; } };
@@ -28,14 +43,27 @@ const album = [];
 let favorites = null; // null = this account has never stored favourites
 const signedIn = () => ({email: 'qa@example.invalid', gender: 'male', remaining: 3});
 let session = signedIn();
-let generateCalls = 0, deleteFailures = false, deleteCalls = 0, importCalls = 0;
+let generateCalls = 0, deleteFailures = false, deleteCalls = 0, importCalls = 0, imageFetches = 0;
+// Every favourites write the account receives, in order: `{ids}` is this device
+// adopting its local list, `{add}`/`{remove}` is one atomic edit.
 const favoriteWrites = [];
+// When armed, the next album read is held open until the test releases it, so a
+// response can be made to arrive after the user signed out.
+let galleryGate = null;
 const row = (name, style, bytes) => ({id: newId(), name, style, created: new Date().toISOString(), size: bytes.length, bytes});
 
 const server = await startStatic({
 	handler: async (req, res, url) => {
 		const path = url.pathname;
 		if (path === '/hairplay/api/session') { json(res, 200, {account: session}); return true; }
+		if (path === '/hairplay/api/auth/logout') { session = null; json(res, 200, {ok: true}); return true; }
+		if (path === '/hairplay/api/auth/code') { json(res, 200, {ok: true}); return true; }
+		if (path === '/hairplay/api/auth/login') {
+			const body = await readBody(req);
+			session = {...signedIn(), email: String(body.email || 'qa@example.invalid')};
+			json(res, 200, {ok: true});
+			return true;
+		}
 		if (path === '/hairplay/api/generate') {
 			const body = await readBody(req);
 			generateCalls++;
@@ -47,6 +75,7 @@ const server = await startStatic({
 			return true;
 		}
 		if (path === '/hairplay/api/gallery' && req.method === 'GET') {
+			if (galleryGate) { const gate = galleryGate; galleryGate = null; await gate.promise; }
 			if (!session) { json(res, 401, {error: '登录状态已失效，请重新登录'}); return true; }
 			json(res, 200, {images: album.map(({bytes, ...meta}) => meta)});
 			return true;
@@ -74,7 +103,8 @@ const server = await startStatic({
 			const id = decodeURIComponent(path.slice('/hairplay/api/gallery/'.length));
 			const found = album.find(i => i.id === id);
 			if (!session || !found) { json(res, 404, {error: '这张图片已不在云端账户中'}); return true; }
-			res.writeHead(200, {'Content-Type': 'image/jpeg', 'Content-Length': String(found.bytes.length), 'Cache-Control': 'private, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff'});
+			imageFetches++;
+			res.writeHead(200, {'Content-Type': 'image/jpeg', 'Content-Length': String(found.bytes.length), 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'});
 			res.end(found.bytes);
 			return true;
 		}
@@ -82,11 +112,30 @@ const server = await startStatic({
 			if (req.method === 'POST') {
 				const body = await readBody(req);
 				if (!session) { json(res, 401, {error: '登录状态已失效，请重新登录'}); return true; }
-				favorites = Array.isArray(body.ids) ? body.ids : [];
-				favoriteWrites.push([...favorites]);
-				json(res, 200, {ids: favorites});
+				// Adopting this device's list is allowed exactly once; a second device that
+				// tries to adopt gets the authoritative list back with 409 instead.
+				if (Array.isArray(body.ids)) {
+					favoriteWrites.push({ids: [...body.ids]});
+					if (favorites !== null) { json(res, 409, {ok: false, ids: favorites}); return true; }
+					favorites = [...new Set(body.ids)].slice(0, 50);
+					json(res, 200, {ok: true, ids: favorites});
+					return true;
+				}
+				const ops = ['add', 'remove'].filter(k => typeof body[k] === 'string');
+				if (ops.length !== 1) { json(res, 400, {error: '收藏参数无效'}); return true; }
+				const [op] = ops, styleId = body[op];
+				favoriteWrites.push({[op]: styleId});
+				favorites = favorites || [];
+				if (op === 'add') {
+					if (!favorites.includes(styleId)) {
+						if (favorites.length >= 50) { json(res, 429, {error: '最多收藏 50 个模板，请先取消一个。'}); return true; }
+						favorites = [...favorites, styleId];
+					}
+				} else favorites = favorites.filter(id => id !== styleId);
+				json(res, 200, {ok: true, ids: favorites});
 				return true;
 			}
+			if (!session) { json(res, 401, {error: '登录状态已失效，请重新登录'}); return true; }
 			json(res, 200, {ids: favorites || [], initialized: favorites !== null});
 			return true;
 		}
@@ -183,7 +232,9 @@ try {
 	const favoriteName = await page.locator('.style-name').innerText();
 	await page.locator('uni-button').filter({hasText: '☆ 收藏这个模板'}).click();
 	await page.locator('.notice').filter({hasText: '已收藏'}).waitFor();
-	assert.equal(favoriteWrites.at(-1)?.length, 1, 'the account must store the favourite');
+	const favoriteId = (await readFavorites(page)).at(-1).styleId;
+	assert.deepEqual(favoriteWrites.at(-1), {add: favoriteId}, 'the account must receive one atomic add');
+	assert.deepEqual(favorites, [favoriteId], 'the account list must hold the favourite');
 	assert.equal(await page.locator('uni-button').filter({hasText: '★ 已收藏这个模板'}).count(), 1);
 	await page.locator('uni-button[aria-label="返回"]').click();
 	await openGallery(page);
@@ -205,7 +256,8 @@ try {
 	await favoriteCards(page).first().click();
 	await page.locator('uni-button').filter({hasText: '取消收藏'}).click();
 	await page.locator('.notice').filter({hasText: '已取消收藏'}).waitFor();
-	assert.deepEqual(favoriteWrites.at(-1), [], 'removing a favourite must reach the account');
+	assert.deepEqual(favoriteWrites.at(-1), {remove: favoriteId}, 'removing a favourite must be one atomic remove on the account');
+	assert.deepEqual(favorites, [], 'the account must no longer hold the favourite');
 	await page.locator('uni-button').filter({hasText: '返回相册'}).click();
 	assert.equal(await favoriteCards(page).count(), 0);
 	summary.push('favorites=OK');
@@ -250,7 +302,7 @@ try {
 	await page.goto(url, {waitUntil: 'networkidle'});
 	const localFavorites = await page.evaluate(key => JSON.parse(localStorage.getItem(key)).favorites.map(f => f.styleId), STATE_KEY);
 	assert.ok(localFavorites.length > 0);
-	assert.deepEqual(favoriteWrites.at(-1), localFavorites, 'the first sign-in must push the local list up');
+	assert.deepEqual(favoriteWrites.at(-1)?.ids, localFavorites, 'the first sign-in must push the local list up');
 	assert.deepEqual(favorites, localFavorites);
 	summary.push('favorites_adoption=OK');
 
@@ -388,6 +440,192 @@ try {
 	await one.close();
 	await two.close();
 	summary.push('cross_tab_converges=OK');
+
+	// 11. A cloud response that arrives after signing out belongs to the account the
+	//     user left: it must never repopulate (or cache) that account's pictures for
+	//     whoever is signed in now.
+	album.length = 0;
+	favorites = null;
+	session = signedIn();
+	album.push(row('庞巴杜发型', 'catalog-53-1', cloudJpeg));
+	const late = await context.newPage();
+	watch(late);
+	await late.goto(url, {waitUntil: 'networkidle'});
+	await late.evaluate(() => localStorage.clear());
+	const stale = deferred();
+	galleryGate = stale;
+	await late.reload({waitUntil: 'load'});
+	await late.locator('.tabs uni-button[aria-label="导航 个人资料"]').click();
+	await late.locator('uni-button').filter({hasText: '退出登录'}).click();
+	await late.locator('#auth-email input').waitFor();
+	// Whoever signs in next owns an empty album of their own.
+	album.length = 0;
+	favorites = null;
+	await late.locator('#auth-email input').fill('other@example.invalid');
+	await late.locator('#auth-code input').fill('123456');
+	await late.locator('uni-button').filter({hasText: '注册 / 登录'}).click();
+	await late.locator('.description').filter({hasText: '已登录：other@example.invalid'}).first().waitFor();
+	await late.locator('.tabs uni-button[aria-label="导航 画廊"]').click();
+	await late.locator('.empty-mini').first().waitFor();
+	assert.equal(await cards(late).count(), 0, 'the new account must not see the previous account\'s album');
+	const fetchesBefore = imageFetches;
+	// Release the stale response and give it the window in which a leaked one would
+	// show up: nothing about the signed-in view may change.
+	stale.resolve();
+	await late.waitForTimeout(1200);
+	assert.equal(await cards(late).count(), 0, 'a response for the previous account must be dropped');
+	assert.deepEqual(await readGenerations(late), [], 'a dropped response must not cache pictures either');
+	assert.equal(imageFetches, fetchesBefore, 'a dropped response must not download any picture');
+	await late.close();
+	summary.push('stale_response_after_signout=OK');
+
+	// 12. A cached copy the browser can no longer decode is re-downloaded from the
+	//     account instead of being rendered as a broken picture.
+	album.length = 0;
+	session = signedIn();
+	favorites = null;
+	const stalePage = await context.newPage();
+	watch(stalePage);
+	await stalePage.goto(url, {waitUntil: 'networkidle'});
+	await stalePage.evaluate(() => localStorage.clear());
+	const target = row('发际纹身渐变', 'catalog-53-1', cloudJpeg);
+	album.push(target);
+	const undecodable = undecodableJpeg();
+	await stalePage.evaluate(([record, key]) => localStorage.setItem(key, JSON.stringify([record])), [
+		{id: 'gen-stale', name: '发际纹身渐变', created: target.created, image: undecodable, source: 'ai', cloud: target.id},
+		'hairplay.generations.v1',
+	]);
+	const fetches = imageFetches;
+	await stalePage.reload({waitUntil: 'networkidle'});
+	await stalePage.waitForFunction(bad => {
+		const list = JSON.parse(localStorage.getItem('hairplay.generations.v1') || '[]');
+		return list.length === 1 && typeof list[0].image === 'string' && list[0].image !== bad;
+	}, undecodable);
+	const healed = (await readGenerations(stalePage))[0];
+	assert.ok(healed.image.startsWith('data:image/jpeg;base64,/9j/'), 'the replacement must be a real JPEG');
+	assert.ok(imageFetches > fetches, 'the browser must re-download the account original');
+	await openGallery(stalePage);
+	await stalePage.locator('.card-badge.ai').first().waitFor();
+	assert.equal(await stalePage.locator('.card-badge.ai').innerText(), 'AI 生成 · 云端');
+	// A refused local write must not leave the unreadable bytes rendering: the copy
+	// downloaded into memory wins over the cache the browser cannot decode.
+	await stalePage.evaluate(([record, key]) => localStorage.setItem(key, JSON.stringify([record])), [
+		{id: 'gen-stale', name: '发际纹身渐变', created: target.created, image: undecodable, source: 'ai', cloud: target.id},
+		'hairplay.generations.v1',
+	]);
+	await stalePage.addInitScript(() => { const original = Storage.prototype.setItem; Storage.prototype.setItem = function (key, value) { if (String(key).includes('hairplay.generations.v1')) return; return original.call(this, key, value); }; });
+	await stalePage.reload({waitUntil: 'networkidle'});
+	await openGallery(stalePage);
+	await stalePage.locator('.notice').filter({hasText: '本机缓存未能写入'}).first().waitFor();
+	await stalePage.locator('.gallery-card img').first().waitFor();
+	const shown = await stalePage.locator('.gallery-card img').first().getAttribute('src');
+	assert.ok(shown?.startsWith('data:image/jpeg;base64,/9j/') && shown !== undecodable, 'the unreadable cached copy must not be rendered');
+	assert.deepEqual((await readGenerations(stalePage)).map(r => r.image), [undecodable], 'the refused write must leave the cache untouched');
+	await stalePage.close();
+	summary.push('stale_cache_refetched=OK');
+
+	// 13. A browser without Web Locks refuses every local write, but must still show
+	//     the account's pictures from memory and say the cache is not on this disk.
+	album.length = 0;
+	session = signedIn();
+	favorites = null;
+	album.push(row('庞巴杜发型', 'catalog-53-1', cloudJpeg));
+	const noLocksContext = await browser.newContext({viewport: {width: 390, height: 844}});
+	await noLocksContext.addInitScript(() => { try { delete Navigator.prototype.locks; } catch { /* already absent */ } });
+	const noLocks = await noLocksContext.newPage();
+	watch(noLocks);
+	await noLocks.goto(url, {waitUntil: 'networkidle'});
+	await openGallery(noLocks);
+	await noLocks.locator('.card-badge.ai').first().waitFor();
+	assert.equal(await noLocks.locator('uni-button[aria-label^="AI 生成记录"]').count(), 1, 'the account picture must still render');
+	assert.match(await noLocks.locator('.gallery-card img').first().getAttribute('src'), /^data:image\/jpeg/, 'the picture must render from memory');
+	await noLocks.locator('.notice').filter({hasText: '本机缓存未能写入'}).first().waitFor();
+	assert.deepEqual(await readGenerations(noLocks), [], 'a refused local write must never be faked');
+	await noLocksContext.close();
+	summary.push('no_web_locks_memory_render=OK');
+
+	// 14. Two tabs editing the favourite list at the same moment must not undo each
+	//     other: every edit is one atomic add/remove on the account's current list.
+	album.length = 0;
+	session = signedIn();
+	favorites = [];
+	const tabA = await context.newPage(), tabB = await context.newPage();
+	watch(tabA);
+	watch(tabB);
+	for (const p of [tabA, tabB]) {
+		await p.goto(url, {waitUntil: 'networkidle'});
+		await p.evaluate(() => localStorage.clear());
+		await p.reload({waitUntil: 'networkidle'});
+		await p.locator('.tabs uni-button[aria-label="导航 发现"]').click();
+	}
+	await tabA.locator('.catalog-card').first().click();
+	await tabB.locator('.catalog-card').nth(1).click();
+	const adds = favoriteWrites.length;
+	await Promise.all([
+		tabA.locator('uni-button').filter({hasText: '☆ 收藏这个模板'}).click(),
+		tabB.locator('uni-button').filter({hasText: '☆ 收藏这个模板'}).click(),
+	]);
+	const added = favoriteWrites.slice(adds).map(write => write.add).filter(Boolean);
+	assert.equal(added.length, 2, 'each tab must send one atomic add');
+	assert.equal(new Set(added).size, 2, 'the two tabs must favourite two different templates');
+	assert.deepEqual([...favorites].sort(), [...added].sort(), 'both adds must survive on the account');
+	for (const p of [tabA, tabB]) {
+		await p.reload({waitUntil: 'networkidle'});
+		await openGallery(p);
+		await p.locator('.card-badge.template').first().waitFor();
+		assert.match(await p.locator('.gallery-section').nth(1).innerText(), /收藏的模板\s+02/, 'both tabs must see both favourites');
+	}
+	await tabA.locator('.tabs uni-button[aria-label="导航 画廊"]').click();
+	await tabB.locator('.tabs uni-button[aria-label="导航 画廊"]').click();
+	await favoriteCards(tabA).first().click();
+	await favoriteCards(tabB).nth(1).click();
+	const removes = favoriteWrites.length;
+	await Promise.all([
+		tabA.locator('uni-button').filter({hasText: '取消收藏'}).click(),
+		tabB.locator('uni-button').filter({hasText: '取消收藏'}).click(),
+	]);
+	const removed = favoriteWrites.slice(removes).map(write => write.remove).filter(Boolean);
+	assert.equal(removed.length, 2, 'each tab must send one atomic remove');
+	assert.equal(new Set(removed).size, 2, 'the two tabs must remove two different templates');
+	assert.deepEqual(favorites, [], 'neither removal may be resurrected by the other tab');
+	for (const p of [tabA, tabB]) {
+		await p.reload({waitUntil: 'networkidle'});
+		await openGallery(p);
+		await p.locator('.gallery-section').nth(1).waitFor();
+		assert.match(await p.locator('.gallery-section').nth(1).innerText(), /收藏的模板\s+00/);
+	}
+	await tabA.close();
+	await tabB.close();
+	summary.push('concurrent_favorites=OK');
+
+	// 15. A local-only picture that reaches the account but cannot be linked in local
+	//     storage is reported honestly, and the gallery shows one row for it, not two.
+	album.length = 0;
+	session = signedIn();
+	favorites = null;
+	const unlinked = await context.newPage();
+	watch(unlinked);
+	await unlinked.goto(url, {waitUntil: 'networkidle'});
+	await unlinked.evaluate(() => localStorage.clear());
+	await unlinked.evaluate(([record, key]) => localStorage.setItem(key, JSON.stringify([record])), [
+		{id: 'gen-unlinked', name: '庞巴杜发型', created: new Date().toISOString(), image: realJpeg(), source: 'ai'},
+		'hairplay.generations.v1',
+	]);
+	await unlinked.reload({waitUntil: 'networkidle'});
+	await unlinked.waitForFunction(() => JSON.parse(localStorage.getItem('hairplay.generations.v1') || '[]').length === 1);
+	await unlinked.evaluate(() => { const original = Storage.prototype.setItem; Storage.prototype.setItem = function (key, value) { if (String(key).includes('hairplay.generations.v1')) return; return original.call(this, key, value); }; });
+	const imports = importCalls;
+	await openGallery(unlinked);
+	await unlinked.locator('uni-button[aria-label^="AI 生成记录"]').first().click();
+	await unlinked.locator('uni-button').filter({hasText: '同步到云端'}).click();
+	await unlinked.locator('.error').filter({hasText: '未能记住它'}).waitFor();
+	assert.equal(importCalls - imports, 1, 'the picture must reach the account exactly once');
+	assert.equal(album.length, 1);
+	await unlinked.locator('.ai-badge').filter({hasText: '云端账户'}).waitFor();
+	await unlinked.locator('uni-button').filter({hasText: '返回相册'}).click();
+	assert.equal(await cards(unlinked).count(), 1, 'the account copy and the local record must be one row while linked in memory');
+	await unlinked.close();
+	summary.push('unlinked_sync_reported=OK');
 
 	assert.deepEqual(errors, [], 'no page exceptions: ' + errors.join(' | '));
 	console.log('GALLERY_BROWSER_OK ' + summary.join(' ') + ' generate_calls=' + generateCalls + ' imports=' + importCalls + ' errors=0');

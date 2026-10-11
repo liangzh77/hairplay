@@ -11,7 +11,7 @@ const styleNames=new Map(catalog.map(({id,name})=>[id,name]));
 const requestLimit=12*1024*1024;
 const imageLimit=8*1024*1024;
 import sharp from 'sharp';
-import {AuthStore,normalizeEmail,validEmail,validGender,GALLERY_MAX_BYTES,FAVORITE_LIMIT,validStyleId} from './auth.mjs';
+import {AuthStore,normalizeEmail,validEmail,validGender,GALLERY_LIMIT,GALLERY_MAX_BYTES,FAVORITE_LIMIT,validStyleId} from './auth.mjs';
 import {loadMailer} from './mail.mjs';
 
 export async function loadConfig(file=resolve(projectRoot,'.secrets/ark.env')){
@@ -71,7 +71,10 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
    const row=auth.image(user.id,galleryId);
    if(!row){json(res,404,{error:'Not found'});return;}
    const picture=Buffer.from(row.bytes);
-   res.writeHead(200,{'content-type':'image/jpeg','content-length':String(picture.length),'cache-control':'private, max-age=31536000, immutable','x-content-type-options':'nosniff','referrer-policy':'no-referrer'});
+   // The picture belongs to one account and is only served to it, so it must not
+   // survive in the browser's HTTP cache: `no-store` means closing the session (or
+   // signing out) really does end access to the bytes on that machine.
+   res.writeHead(200,{'content-type':'image/jpeg','content-length':String(picture.length),'cache-control':'private, no-store','x-content-type-options':'nosniff','referrer-policy':'no-referrer'});
    res.end(picture);return;}
   if(route==='/api/favorites'&&req.method==='GET'){
    if(!user){json(res,401,{error:'请先使用邮箱登录'});return;}
@@ -92,8 +95,22 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
     auth.setGender(user.id,input.gender);json(res,200,{ok:true});return;
    }
    if(route==='/api/favorites'){
-    if(!Array.isArray(input.ids)||input.ids.length>FAVORITE_LIMIT||!input.ids.every(validStyleId)){json(res,400,{error:'收藏列表无效'});return;}
-    const ids=[...new Set(input.ids)];auth.setFavorites(user.id,ids);json(res,200,{ok:true,ids});return;
+    // Editing is one atomic add/remove on the server's current list so two devices
+    // editing from stale snapshots cannot resurrect each other's removals. Sending
+    // the whole list is only how a fresh account adopts the favourites this device
+    // already collected; once the account has a list of its own, that write is
+    // refused with the authoritative list instead of overwriting it.
+    if(Array.isArray(input.ids)){
+     if(input.ids.length>FAVORITE_LIMIT||!input.ids.every(validStyleId)){json(res,400,{error:'收藏列表无效'});return;}
+     const adopted=auth.adoptFavorites(user.id,input.ids);
+     json(res,adopted.conflict?409:200,{ok:!adopted.conflict,ids:adopted.ids,initialized:true});return;
+    }
+    if((input.add!==undefined)===(input.remove!==undefined)){json(res,400,{error:'收藏操作无效'});return;}
+    const styleId=input.add!==undefined?input.add:input.remove;
+    if(!validStyleId(styleId)){json(res,400,{error:'收藏操作无效'});return;}
+    try{const result=input.add!==undefined?auth.addFavorite(user.id,styleId):auth.removeFavorite(user.id,styleId);
+     json(res,200,{ok:true,ids:result.ids,initialized:true});return;}
+    catch(e){json(res,e.status||400,{error:e.message});return;}
    }
    if(route==='/api/gallery/delete'){
     // Idempotent on purpose: deleting a picture another device already removed is
@@ -134,6 +151,10 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
    if(input.requirements!==undefined&&(typeof input.requirements!=='string'||input.requirements.length>300))throw Error('要求文字过长');
    const stylePath=styles.get(input.styleId);
    if(!/^\/static\/catalog\/ai-(?:catalog-\d+-[01]|dracula)\.jpg$/.test(stylePath))throw Error('参考图不在允许列表');
+   // A full album is refused before the paid upstream call: no quota is charged
+   // for a picture that could never be stored. The store enforces the same cap
+   // inside the commit, so an import racing this generation cannot break it.
+   if(auth.countImages(user.id)>=GALLERY_LIMIT){json(res,409,{error:'云端相册已满（最多 '+GALLERY_LIMIT+' 张），请先删除一张再生成；本次未扣额度'});return;}
    job=auth.reserve(user.id);if(!job){json(res,429,{error:'每个账户终身最多成功生成 3 张图片'});return;}
    const style=await readStyle(resolve(projectRoot,'client/src'+stylePath));
    const prompt=`以图1的成年人物为主体，仅将图1的发型改变为图2所示发型。尽可能保持图1人物五官、身份特征、肤色、服装、姿势与背景；自然发际线，真实摄影效果，不加水印与文字。${input.requirements?'补充要求：'+input.requirements:''}`;
@@ -149,7 +170,7 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
    // picture. `job=null` only after that commit, so a storage failure refunds it.
    const saved=auth.finishWithImage(job,{name:styleNames.get(input.styleId),style:input.styleId},result);job=null;
    json(res,200,{image:'data:image/jpeg;base64,'+raw,remaining:auth.remaining(user.id),record:saved?{id:saved.id,created:new Date(saved.created).toISOString()}:null});
-  }catch(e){json(res,e.status|| (job?502:400),{error:job?'生成失败，请稍后重试；未扣成功额度':e.status===429?e.message:'请求无效，请检查输入'});}
+  }catch(e){json(res,e.status|| (job?502:400),{error:job?(e.status===429?e.message+'；本次未扣成功额度':'生成失败，请稍后重试；未扣成功额度'):e.status===429?e.message:'请求无效，请检查输入'});}
   finally{try{if(job)auth.finish(job,false);}finally{if(ownsActive)active=false;}}
   }catch{
    // SQLite lock/corruption and other unexpected errors must not crash Node or leak details.

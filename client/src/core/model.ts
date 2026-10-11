@@ -57,6 +57,10 @@ export function removeFavorites(list:SavedStyle[],styleIds:string[]){return list
 // server, while this device keeps a downscaled copy as a cache, so the gallery
 // still renders offline and after the localStorage cache is cleared.
 export const GENERATION_LIMIT=6;
+// The account album is capped as well, and that cap is what the server enforces
+// (GALLERY_LIMIT there). Deleting a picture frees a slot but never restores the
+// lifetime generation quota.
+export const CLOUD_LIMIT=3;
 export const GENERATION_IMAGE_MAX=2_200_000;
 export interface GeneratedRecord {id:string;name:string;image:string;created:string;source:'ai';cloud?:string}
 const CLOUD_ID=/^[0-9a-f]{24}$/;
@@ -100,9 +104,14 @@ export function isValidGeneratedImage(image:unknown):image is string{
  if(!image.startsWith('data:image/jpeg;base64,/9j/'))return false;
  if(image.length<1_024||image.length>GENERATION_IMAGE_MAX)return false;
  return jpegEndsWithEoi(image.slice('data:image/jpeg;base64,'.length));}
+// `CLOUD_ID.test()` alone is not enough: a RegExp coerces its argument, so an
+// array such as ["aaaa…"] stringifies into a matching id and the record would be
+// linked to a picture this device never downloaded (and then dropped on the next
+// sync). Every check of the pointer therefore requires a real string first.
+const validCloudId=(value:unknown):value is string=>typeof value==='string'&&CLOUD_ID.test(value);
 export function isGeneratedRecord(value:unknown):value is GeneratedRecord{
  const r=value as GeneratedRecord|undefined;
- return !!r&&typeof r==='object'&&r.source==='ai'&&typeof r.id==='string'&&r.id.startsWith('gen-')&&typeof r.name==='string'&&r.name.length>0&&r.name.length<=60&&typeof r.created==='string'&&(r.cloud===undefined||CLOUD_ID.test(r.cloud))&&isValidGeneratedImage(r.image);}
+ return !!r&&typeof r==='object'&&r.source==='ai'&&typeof r.id==='string'&&r.id.startsWith('gen-')&&typeof r.name==='string'&&r.name.length>0&&r.name.length<=60&&typeof r.created==='string'&&(r.cloud===undefined||validCloudId(r.cloud))&&isValidGeneratedImage(r.image);}
 // A stored pointer to a cloud copy that is not a server id is dropped instead of
 // invalidating the whole record: the cached picture is still a picture the user
 // generated, so it stays visible as a local-only result.
@@ -110,10 +119,10 @@ export function sanitizeGeneratedRecord(value:unknown):GeneratedRecord|null{
  if(!value||typeof value!=='object')return null;
  const {cloud,...rest}=value as GeneratedRecord;
  if(!isGeneratedRecord({...rest,cloud:undefined}))return null;
- return cloud!==undefined&&CLOUD_ID.test(cloud)?{...rest,cloud}:rest as GeneratedRecord;}
+ return validCloudId(cloud)?{...rest,cloud}:rest as GeneratedRecord;}
 export function makeGeneratedRecord(name:string,image:string,cloud?:string):GeneratedRecord{
  const record:GeneratedRecord={id:`gen-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,name:name.slice(0,60)||'AI 发型',image,created:new Date().toISOString(),source:'ai'};
- return cloud&&CLOUD_ID.test(cloud)?{...record,cloud}:record;}
+ return validCloudId(cloud)?{...record,cloud}:record;}
 export function decodeGenerations(value:unknown):GeneratedRecord[]{
  try{const v=typeof value==='string'?JSON.parse(value):value;if(!Array.isArray(v))return [];
   return v.map(sanitizeGeneratedRecord).filter((r):r is GeneratedRecord=>!!r).slice(0,GENERATION_LIMIT);}catch{return [];}
