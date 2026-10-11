@@ -24,9 +24,9 @@ with tempfile.TemporaryDirectory(prefix='hairplay-real-rollback-', dir='/tmp') a
  const s=new AuthStore(db);let login=true,error='';
  if(target==='releases/{old}'){{
   s.db.prepare('DELETE FROM sends').run();const code=s.issue('rollback@example.invalid','fake-rollback');
-  try{{const token=s.verify('rollback@example.invalid',code);login=!!token;if(!login)throw Error('correct code rejected');const u=s.session(token);s.setFavorites(u.id,['dracula']);s.addImage(u.id,{name:'old-write'},Buffer.alloc(1024,2));s.logout(token);if(s.session(token))throw Error('logout failed');s.db.prepare('DELETE FROM sends').run();if(!s.verify('rollback@example.invalid',s.issue('rollback@example.invalid','fake-relogin')))throw Error('relogin failed');}}catch(e){{login=false;error=e.message}}
+  try{{const token=s.verify('rollback@example.invalid',code);login=!!token;if(!login)throw Error('correct code rejected');const u=s.session(token);s.setFavorites(u.id,['dracula']);s.addImage(u.id,{{name:'old-write'}},Buffer.alloc(1024,2));s.logout(token);if(s.session(token))throw Error('logout failed');s.db.prepare('DELETE FROM sends').run();if(!s.verify('rollback@example.invalid',s.issue('rollback@example.invalid','fake-relogin')))throw Error('relogin failed');}}catch(e){{login=false;error=e.message}}
   writeFileSync({json.dumps(str(result))},JSON.stringify({{login,error}}));
- }}else{{s.setFavorites(1,['new-write-before-health-failure']);s.addImage(1,{name:'new-write'},Buffer.alloc(1024,1));}}
+ }}else{{s.setFavorites(1,['new-write-before-health-failure']);s.addImage(1,{{name:'new-write'}},Buffer.alloc(1024,1));}}
  s.close();writeFileSync({json.dumps(str(health))},target==='releases/{old}'?'{{"account":null}}':'UNHEALTHY_AFTER_REAL_MIGRATION');
  """)
  health.write_bytes(b'{"account":null}')
