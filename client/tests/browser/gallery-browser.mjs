@@ -448,10 +448,15 @@ try {
 		one.locator('uni-button').filter({hasText: '确认删除'}).click(),
 		two.locator('uni-button').filter({hasText: '确认删除'}).click(),
 	]);
-	await one.locator('.notice').filter({hasText: '已删除这张图片'}).first().waitFor();
-	await two.locator('.notice').filter({hasText: '已删除这张图片'}).first().waitFor();
+	// An acknowledged delete snapshot may already be superseded by the peer's
+	// newer commit. v2 silently drops that old snapshot/notice; requiring TWO
+	// success notices would require accepting an obsolete response. Preserve the
+	// actual two-delete/convergence assertion, BEFORE reload can heal any error.
+	for (let n=0;n<100&&album.length;n++)await one.waitForTimeout(30);
 	assert.equal(album.length, 0, 'both account copies must be gone');
 	for (const p of [one, two]) {
+		await p.waitForFunction(() => JSON.parse(localStorage.getItem('hairplay.generations.v1') || '[]').length === 0);
+		assert.equal(await p.locator('.error').count(),0,'superseded success is silent, not a failure');
 		await p.reload({waitUntil: 'networkidle'});
 		await p.waitForFunction(() => JSON.parse(localStorage.getItem('hairplay.generations.v1') || '[]').length === 0);
 		await openGallery(p);
