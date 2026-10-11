@@ -160,7 +160,17 @@ class ApiReleaseTests(unittest.TestCase):
 
     def test_pack_api_rejects_dependencies_secrets_and_state(self):
         for name in ['node_modules/sharp/index.js', '.secrets/ark.env', '.data/auth.sqlite',
-                     'server/backup.sqlite', '.env', 'server/ark.mjs.bak']:
+                     'server/backup.sqlite', '.env', 'server/ark.mjs.bak',
+                     # Nested, but exactly as forbidden as at the top level.
+                     'client/src/node_modules/x.json', 'client/src/core/__MACOSX/x.json',
+                     'client/src/core/catalog.json.bak', 'client/src/core/dump.sqlite',
+                     'client/src/core/x.env', 'client/src/core/x.log', 'client/src/core/x.pem',
+                     'client/src/.git/config', 'client/src/core/x.tgz',
+                     # Committed, harmless-looking and still not part of the contract:
+                     # the API release is an allowlist, not "anything under server/".
+                     'server/ark.test.mjs', 'client/src/pages/index/index.vue',
+                     'client/src/static/catalog/placeholder.svg', 'client/src/core/x.json',
+                     'client/src/core/unknown.bin']:
             with self.subTest(name=name):
                 path = self.tree / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -181,11 +191,47 @@ class ApiReleaseTests(unittest.TestCase):
     def test_api_manifest_rejects_secret_entries(self):
         manifest = self.root / 'api-manifest.json'
         release.pack_api(self.tree, self.root / 'api.tgz', manifest)
-        data = json.loads(manifest.read_text())
-        data['.secrets/ark.env'] = '0' * 64
-        manifest.write_text(json.dumps(data))
-        with self.assertRaisesRegex(ValueError, 'Secret/state file prohibited'):
-            release.manifest(manifest, 'api')
+        good = manifest.read_text()
+        for name in ['.secrets/ark.env', 'server/ark.mjs.bak', 'client/src/core/node_modules/x.json',
+                     'client/src/core/dump.sqlite', 'server/ark.test.mjs', 'client/src/core/x.json']:
+            with self.subTest(name=name):
+                data = json.loads(good)
+                data[name] = '0' * 64
+                manifest.write_text(json.dumps(data))
+                # A manifest is the contract the deployed tree is verified against:
+                # what the packer refuses to ship, the verifier must refuse to bless.
+                with self.assertRaisesRegex(ValueError, 'Unapproved API path'):
+                    release.manifest(manifest, 'api')
+        manifest.write_text(good)
+
+    def test_verify_api_release_rejects_symlinked_parent_directory(self):
+        manifest = self.root / 'api-manifest.json'
+        release.pack_api(self.tree, self.root / 'api.tgz', manifest)
+        expected = release.manifest(manifest, 'api')
+        deployed = self.root / 'linked'
+        shutil.copytree(self.tree, deployed)
+        (deployed / 'node_modules').mkdir()
+        (deployed / '.data').symlink_to(self.root)
+        (deployed / '.secrets').symlink_to(self.root)
+        release.verify_api_tree(deployed, expected)
+        # Same bytes, but the code now lives outside the release tree where a later
+        # edit would silently change what runs: the verifier must not accept it.
+        external = self.root / 'external-server'
+        (deployed / 'server').rename(external)
+        (deployed / 'server').symlink_to(external)
+        with self.assertRaisesRegex(ValueError, 'Symlinked/missing release directory: server'):
+            release.verify_api_tree(deployed, expected)
+        (deployed / 'server').unlink()
+        external.rename(deployed / 'server')
+        # A symlinked intermediate directory is the same escape one level deeper.
+        external = self.root / 'external-core'
+        (deployed / 'client/src/core').rename(external)
+        (deployed / 'client/src/core').symlink_to(external)
+        with self.assertRaisesRegex(ValueError, 'Symlinked/missing release directory: client/src/core'):
+            release.verify_api_tree(deployed, expected)
+        (deployed / 'client/src/core').unlink()
+        external.rename(deployed / 'client/src/core')
+        release.verify_api_tree(deployed, expected)
     def test_verify_api_release_accepts_runtime_entries_only(self):
         manifest = self.root / 'api-manifest.json'
         release.pack_api(self.tree, self.root / 'api.tgz', manifest)

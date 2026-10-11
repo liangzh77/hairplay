@@ -4,11 +4,17 @@
 Never touches /opt/hairplay, /var/lib/hairplay, /etc/hairplay, systemd or Caddy.
 It uses the documented HAIRPLAY_API_* overrides, a temporary sandbox root and a
 stub "restart" hook, and asserts: happy publish, refusal to overwrite a release,
-health-failure rollback to the previous release, and tampered-archive rejection.
+health-failure rollback to the previous release (wrong body, the right body plus
+an extra line, and a non-200 endpoint), and tampered-archive rejection.
+
+The stub service serves the exact bytes the stub restarter leaves in the health
+file, so the publisher's health contract is exercised end to end: a body that is
+not exactly `{"account":null}`, or a non-200 status, must refuse the release.
 Run it on a Linux host (the production one is fine) as root:
     python3 scripts/test_api_remote_publish.py
 """
 import hashlib
+import http.server
 import json
 import os
 from pathlib import Path
@@ -18,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import tarfile
+import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import release  # noqa: E402
@@ -26,6 +33,8 @@ SCRIPTS = Path(__file__).resolve().parent
 SOURCE = (SCRIPTS / 'release-api-remote.sh').read_text()
 OK_ID = '20270101T000000Z'
 BROKEN_ID = '20270102T000000Z'
+EXTRA_ID = '20270104T000000Z'
+FAIL_ID = '20270105T000000Z'
 OLD_ID = '20260101T000000Z'
 BROKEN_BODY = '{"account":"broken"}'
 OK_BODY = '{"account":null}'
@@ -80,24 +89,65 @@ def main():
         (old / '.secrets').symlink_to(secrets)
         (root / 'current').symlink_to(f'releases/{OLD_ID}')
 
-        # A stub service: healthy for the old release, unhealthy for BROKEN_ID.
+        # The stub service is reachable over real HTTP, so the health contract
+        # (HTTP 200 and one exact body) is exercised rather than approximated.
+        class HealthHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path != '/session':
+                    self.send_error(404)
+                    return
+                try:
+                    body = health.read_bytes()
+                except OSError:
+                    # No file means the stub service cannot answer: a non-200
+                    # status with an empty body, like a crash-looping service.
+                    self.send_error(503)
+                    return
+                self.send_response(200)
+                self.send_header('content-type', 'application/json')
+                self.send_header('content-length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        service = http.server.ThreadingHTTPServer(('127.0.0.1', 0), HealthHandler)
+        threading.Thread(target=service.serve_forever, daemon=True).start()
+        health_url = f'http://127.0.0.1:{service.server_address[1]}/session'
+
+        # A stub service: healthy for the old release, a wrong body for BROKEN_ID,
+        # the correct first line plus an extra line for EXTRA_ID — which a line
+        # match would wrongly accept — and no answer at all for FAIL_ID.
+        #
+        # One quoted expansion per case pattern, and the paths in variables: a
+        # pattern with an empty quoted string right before `)` ("releases/""$ID"")
+        # misparses on bash 5.2 into a pattern that never matches, which would
+        # silently fall through to the healthy branch and make every health
+        # assertion here vacuous.
         restarter = tmp / 'restarter.sh'
         restarter.write_text(
             '#!/usr/bin/env bash\nset -euo pipefail\n'
             'target=$(readlink "$HAIRPLAY_API_ROOT/current")\n'
-            'if [[ "$target" == "releases/$HAIRPLAY_REHEARSAL_BROKEN_ID" ]]; then\n'
-            f'  printf %s {json.dumps(BROKEN_BODY)} > "$HAIRPLAY_REHEARSAL_HEALTH"\n'
-            'else\n'
-            f'  printf %s {json.dumps(OK_BODY)} > "$HAIRPLAY_REHEARSAL_HEALTH"\n'
-            'fi\n')
-        health.write_text('{"account":null}')
+            'broken="releases/$HAIRPLAY_REHEARSAL_BROKEN_ID"\n'
+            'extra="releases/$HAIRPLAY_REHEARSAL_EXTRA_ID"\n'
+            'fail="releases/$HAIRPLAY_REHEARSAL_FAIL_ID"\n'
+            'case "$target" in\n'
+            '  "$broken") printf %s \'{"account":"broken"}\' > "$HAIRPLAY_REHEARSAL_HEALTH" ;;\n'
+            '  "$extra") printf \'%s\\n%s\' \'{"account":null}\' \'{"extra":true}\' > "$HAIRPLAY_REHEARSAL_HEALTH" ;;\n'
+            '  "$fail") rm -f "$HAIRPLAY_REHEARSAL_HEALTH" ;;\n'
+            '  *) printf %s \'{"account":null}\' > "$HAIRPLAY_REHEARSAL_HEALTH" ;;\n'
+            'esac\n')
+        health.write_text(OK_BODY)
         env = {**os.environ,
                'HAIRPLAY_API_ROOT': str(root),
                'HAIRPLAY_API_DATA': str(data),
                'HAIRPLAY_API_SECRETS': str(secrets),
                'HAIRPLAY_API_RESTART': f'bash {restarter}',
-               'HAIRPLAY_API_HEALTH': f'file://{health}',
+               'HAIRPLAY_API_HEALTH': health_url,
                'HAIRPLAY_REHEARSAL_BROKEN_ID': BROKEN_ID,
+               'HAIRPLAY_REHEARSAL_EXTRA_ID': EXTRA_ID,
+               'HAIRPLAY_REHEARSAL_FAIL_ID': FAIL_ID,
                'HAIRPLAY_REHEARSAL_HEALTH': str(health)}
 
         def publish(release_id, archive, manifest, mode='deploy'):
@@ -150,7 +200,17 @@ def main():
         # failure here would have aborted before the switch and skipped the rollback.
         check('lockfile change re-installs dependencies',
               not (root / 'releases' / BROKEN_ID / 'node_modules' / '.keep').exists())
-        check('health recovered', health.read_text() == '{"account":null}')
+        check('health recovered', health.read_text() == OK_BODY)
+
+        # 3b. `{"account":null}` plus another line is not the contract: a line
+        # match would publish it, the exact-body check must refuse and roll back.
+        archive_extra, manifest_extra = pack('extra')
+        result = publish(EXTRA_ID, archive_extra, manifest_extra)
+        check('extra health line refused', result.returncode != 0 and 'API_PUBLISH_OK' not in result.stdout,
+              result.stdout[-300:])
+        check('extra health line rolled back', 'API_PUBLISH_ROLLED_BACK' in result.stderr, result.stderr[-400:])
+        check('extra release not served', os.readlink(root / 'current') == f'releases/{OK_ID}')
+        check('health body rewrote itself', health.read_text() == OK_BODY)
 
         # 3b. The documented rollback command republishes the older release.
         old_archive, old_manifest = pack('old-tree')
@@ -186,8 +246,22 @@ def main():
         result = subprocess.run(
             ['python3', str(SCRIPTS / 'release.py'), 'verify-tree', str(root / 'releases' / OK_ID),
              str(manifest4), '--kind', 'api'], capture_output=True, text=True)
-        check('secret manifest rejected', result.returncode != 0 and 'Secret/state file prohibited' in result.stderr,
+        check('secret manifest rejected', result.returncode != 0 and 'Unapproved API path' in result.stderr,
               result.stderr[-300:])
+
+        # 7. A health endpoint that answers with a non-200 status (and no body) is
+        # a failure even though the release itself started; the release must roll
+        # back to the previous one. The stub service returns 503 once its health
+        # file is gone, which the stub restarter does for FAIL_ID.
+        fail_archive, fail_manifest = pack('fail')
+        result = publish(FAIL_ID, fail_archive, fail_manifest)
+        check('non-200 health refused', result.returncode != 0 and 'API health check failed' in result.stderr,
+              result.stderr[-300:])
+        check('non-200 health rolled back', 'API_PUBLISH_ROLLED_BACK' in result.stderr, result.stderr[-400:])
+        check('non-200 release not served', os.readlink(root / 'current') == f'releases/{OK_ID}')
+        check('non-200 release left for inspection', (root / 'releases' / FAIL_ID).is_dir())
+        check('non-200 health recovered', health.read_text() == OK_BODY)
+        health.write_text(OK_BODY)
 
     print(f'API_REHEARSAL {"OK" if not failures else "FAILED"} failures={failures}')
     return 1 if failures else 0

@@ -20,7 +20,14 @@ cd "$repo"
   echo 'Backend sources have uncommitted changes; commit before publishing' >&2; exit 2; }
 [[ ! -e "$out" ]] || { echo "Stale package directory $out" >&2; exit 2; }
 mkdir -p "$out/tree"
-git archive --format=tar HEAD server client/src package.json package-lock.json | tar -x -C "$out/tree"
+# The archive paths are the API contract's allowlist (see API_ALLOWED in release.py):
+# the backend modules, the catalogue index and the catalogue pictures. `pack-api`
+# re-checks every member, so a path added here without a rule is refused. The H5-only
+# placeholder icon is committed but is not part of the API contract.
+git archive --format=tar HEAD package.json package-lock.json \
+  server/ark.mjs server/auth.mjs server/auth-worker.mjs server/mail.mjs \
+  client/src/core/catalog.json client/src/static/catalog \
+  ':(exclude)client/src/static/catalog/placeholder.svg' | tar -x -C "$out/tree"
 python3 "$scripts/release.py" pack-api "$out/tree" "$out/manifest.json" --archive "$out/release.tgz"
 python3 "$scripts/release.py" verify-archive "$out/release.tgz" "$out/manifest.json" --kind api
 shasum -a 256 "$out/release.tgz" "$out/manifest.json"

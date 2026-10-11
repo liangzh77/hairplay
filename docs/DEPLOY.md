@@ -19,7 +19,7 @@ npm --workspace client run build:mp-weixin
 
 ## API 发布（`scripts/deploy-api.sh` + `scripts/release-api-remote.sh`）
 
-后端不是纯静态文件：发布树里除代码外还有依赖 `node_modules/`、软链接 `.data -> /var/lib/hairplay`（额度/相册 SQLite）和 `.secrets -> /etc/hairplay`（SMTP/Ark 凭据）。所以 API 走独立发布通道；**发布包只含已提交的后端源码**，绝不包含依赖、数据库或密钥（`manifest(...,'api')` 会拒绝 `node_modules/`、`.data/`、`.secrets/`、`.git/`、`*.sqlite*|*.env|*.log|*.pem|*.key` 与未知路径）。
+后端不是纯静态文件：发布树里除代码外还有依赖 `node_modules/`、软链接 `.data -> /var/lib/hairplay`（额度/相册 SQLite）和 `.secrets -> /etc/hairplay`（SMTP/Ark 凭据）。所以 API 走独立发布通道；**发布包只含已提交的后端源码**，绝不包含依赖、数据库或密钥。允许清单是**显式白名单**（`scripts/release.py` 的 `API_ALLOWED`）：四个后端模块 `server/{ark,auth,auth-worker,mail}.mjs`、目录索引 `client/src/core/catalog.json`、目录图片 `client/src/static/catalog/*.jpg` 与 `package.json`/`package-lock.json`——共 34 个文件（27 张图 + 索引 + 4 个模块 + 2 个清单）。测试文件（如 `server/ark.test.mjs`）、前端页面/平台源码、`.svg` 与任何未知文件都会被拒绝，而不是被默默收进包里。`pack_api` 与 `manifest(...,'api')` 共用同一条规则，分别报 `Unapproved API file: …` 和 `Unapproved API path: …`；此外仍拒绝 `node_modules/`、`.data/`、`.secrets/`、`.git/`、点号开头的组件与 `*.sqlite*|*.env|*.log|*.pem|*.key|*.tgz` 等后缀。`verify_api_tree` 另外拒绝符号链接或缺失的发布目录（`node_modules` 与 `.data`/`.secrets` 两条运行时软链接除外）。
 
 本地（macOS，需要干净的 `server/`、`client/src/`、`package.json`、`package-lock.json`）：
 
@@ -27,7 +27,7 @@ npm --workspace client run build:mp-weixin
 scripts/deploy-api.sh <版本号> [switch]   # 版本号形如 20261011T012345Z；switch 只切换已存在的版本
 ```
 
-它用 `git archive HEAD server client/src package.json package-lock.json` 取**已提交**树（后端有未提交改动会直接拒绝发布），本地跑 `python3 scripts/release.py pack-api` 生成 `release.tgz` + 逐文件 SHA-256 清单并 `verify-archive --kind api` 自查，把包上传到远端 `/tmp/hairplay-api-deploy-<id>`，再对比本地与远端的 `release.py`／`release-api-remote.sh` SHA-256；两者不一致就拒绝发布（远端执行的是远端那份检查器，必须逐字节相同），一致才调用远端脚本。
+它用 `git archive --format=tar HEAD package.json package-lock.json server/ark.mjs server/auth.mjs server/auth-worker.mjs server/mail.mjs client/src/core/catalog.json client/src/static/catalog ':(exclude)client/src/static/catalog/placeholder.svg' | tar -x -C <tree>` 取**已提交**树的**显式路径列表**（后端有未提交改动会直接拒绝发布；`placeholder.svg` 只在 H5 产物里用，不进 API 包），本地跑 `python3 scripts/release.py pack-api` 生成 `release.tgz` + 逐文件 SHA-256 清单并 `verify-archive --kind api` 自查，把包上传到远端 `/tmp/hairplay-api-deploy-<id>`，再对比本地与远端的 `release.py`／`release-api-remote.sh` SHA-256；两者不一致就拒绝发布（远端执行的是远端那份检查器，必须逐字节相同），一致才调用远端脚本。
 
 远端 `/opt/hairplay` 布局：`releases/<id>/`（`server/`、`client/src/`、`package.json`、`package-lock.json`、`node_modules/`，以及 `.data`/`.secrets` 两条软链接）、`current -> releases/<id>`、`.publish.lock`。`scripts/release-api-remote.sh deploy <id> <manifest> <checker> <archive>` 的顺序：
 
@@ -38,7 +38,7 @@ scripts/deploy-api.sh <版本号> [switch]   # 版本号形如 20261011T012345Z�
 5. 仅 root 可读的数据库备份 `sqlite3 /var/lib/hairplay/auth.sqlite ".backup '/var/lib/hairplay/backups/auth-before-api-<id>.sqlite'"`（0600 root:root）。
 6. 原子 `mv -Tf` 切换 `current`，`systemctl restart hairplay-api.service`，再探活 20×1 s：`curl http://127.0.0.1:8777/hairplay/api/session` 必须**恰好**返回 `{"account":null}`，且 `SELECT count(*) FROM users` 与切换前一致（证明共享的账号/额度账本没被发布动作扰动）。任何一步失败即切回旧版本、重启、重新探活，并打印 `API_PUBLISH_ROLLED_BACK current=…`。
 
-`switch <id> <manifest> <checker>` 只做「校验目标发布树 → 原子切换 → 重启 → 探活」，用于回滚。旧版本目录和失败目录都保留（失败时给出路径便于排查），**同一版本号不能重复发布**，重发必须换新 id。`HAIRPLAY_API_ROOT|DATA|SECRETS|RESTART|HEALTH` 只用于隔离演练（`python3 scripts/test_api_remote_publish.py`，Linux 上跑，含 happy/覆盖拒绝/健康失败回滚/篡改拒绝等用例），**禁止在生产主机上设置**。
+`switch <id> <manifest> <checker>` 只做「校验目标发布树 → 原子切换 → 重启 → 探活」，用于回滚。旧版本目录和失败目录都保留（失败时给出路径便于排查），**同一版本号不能重复发布**，重发必须换新 id。`HAIRPLAY_API_ROOT|DATA|SECRETS|RESTART|HEALTH` 只用于隔离演练（`python3 scripts/test_api_remote_publish.py`，Linux 上跑，共 38 项断言：happy publish、覆盖拒绝、误体型/多一行/非 200 三种健康失败回滚、依赖重装、备份与软链接、篡改包与含密钥清单拒绝、switch 回滚/前滚等），**禁止在生产主机上设置**。演练里的 stub 服务把 stub restarter 写进健康文件的**原始字节**直接吐回来，所以演练验的是发布脚本真正看到的响应；注意 stub restarter 的 `case` 模式必须写成 `"$broken")` 这类单个带引号展开——`"releases/""$id"")` 在 bash 5.2 上会因为空串引号导致模式永不匹配并静默落入健康分支，使这些断言全部失效。
 
 `/hairplay/api/*` 之外没有 `/health` 路由（直接访问 404），线上健康检查只认 `/hairplay/api/session`。发布顺序固定为**先 API、后静态**：旧前端会忽略新增的响应字段，而新前端依赖新的 `POST /api/gallery/*`，先发 API 才不会出现 404 窗口。
 

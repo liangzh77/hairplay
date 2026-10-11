@@ -20,8 +20,29 @@ def digest(data):
 
 # The API release is the backend tree only: no build output, no dependencies and
 # no secrets. node_modules is installed server-side from the locked manifest.
+# The allowlist is the exact shape the server runs on: the four backend modules
+# (ark, auth, auth-worker, mail), the catalogue index and the catalogue pictures.
+# Anything else that happens to be committed -- a test file, the client sources,
+# an icon, a `.bin` -- is refused instead of shipped, so the deployed tree is a
+# contract and not a snapshot.
 API_REQUIRED = ('package.json', 'package-lock.json', 'server/ark.mjs', 'server/auth.mjs', 'server/mail.mjs')
-API_ALLOWED = re.compile(r'^(?:server/[A-Za-z0-9_.-]+\.mjs|client/src/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+|package\.json|package-lock\.json)$')
+API_ALLOWED = re.compile(r'^(?:server/(?:ark|auth|auth-worker|mail)\.mjs|client/src/core/catalog\.json|client/src/static/catalog/[A-Za-z0-9_.-]+\.jpg|package\.json|package-lock\.json)$')
+# Dependencies and state are installed/linked on the server, so a release may
+# never carry them. The check is by name at every depth: a nested node_modules or
+# a backup of the database is exactly as forbidden as a top-level one, and it is
+# enforced for manifests and packed archives alike, because a manifest is the
+# contract the deployed tree is verified against.
+API_FORBIDDEN_COMPONENT = ('node_modules', '.git', '.data', '.secrets', '.venv', '__MACOSX')
+API_FORBIDDEN_EXT = re.compile(r'\.(?:sqlite|sqlite-wal|sqlite-shm|sqlite3|db|bak|backup|env|log|pem|key|crt|p12|pfx|swp|swo|orig|rej|tgz|tar|zip)$')
+
+
+def api_name_ok(name):
+    if not API_ALLOWED.fullmatch(name):
+        return False
+    parts = PurePosixPath(name).parts
+    if any(part in API_FORBIDDEN_COMPONENT or part.startswith('.') for part in parts):
+        return False
+    return not API_FORBIDDEN_EXT.search(name)
 
 
 def safe_name(name):
@@ -48,9 +69,10 @@ def manifest(path, kind='static'):
         raise ValueError(f'Unknown kind: {kind}')
     for name, sha in data.items():
         safe_name(name)
-        if kind == 'api' and (name.startswith(('node_modules/', '.data/', '.secrets/', '.git/')) or
-                              re.search(r'\.(?:sqlite|sqlite-wal|sqlite-shm|env|log|pem|key)$', name)):
-            raise ValueError(f'Secret/state file prohibited: {name}')
+        # The same rules as the packer: a manifest that describes a tree the packer
+        # would never produce must be refused, not trusted.
+        if kind == 'api' and not api_name_ok(name):
+            raise ValueError(f'Unapproved API path: {name}')
         if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{64}', sha):
             raise ValueError(f'Invalid hash: {name}')
     return data
@@ -101,6 +123,13 @@ def verify_api_tree(root, expected):
     if root.is_symlink() or not root.is_dir():
         raise ValueError('Release must be a real directory')
     dirs = directories(expected)
+    # Every directory the manifest describes must be a real directory inside the
+    # release: a symlinked parent would let the deployed code live outside the
+    # version tree, where a later edit would silently change what runs.
+    for name in sorted(dirs):
+        path = root / name
+        if path.is_symlink() or not path.is_dir():
+            raise ValueError(f'Symlinked/missing release directory: {name}')
     for name, sha in expected.items():
         path = root / name
         if path.is_symlink() or not path.is_file():
@@ -199,7 +228,7 @@ def pack_api(root, archive, output_manifest):
     if not set(API_REQUIRED) <= files.keys() or dirs != directories(files):
         raise ValueError('Incomplete API tree or unexpected directory')
     for name in files:
-        if not API_ALLOWED.fullmatch(name):
+        if not api_name_ok(name):
             raise ValueError(f'Unapproved API file: {name}')
     with open(output_manifest, 'x') as f:
         json.dump(dict(sorted(files.items())), f, indent=2)

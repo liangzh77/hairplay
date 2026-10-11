@@ -48,13 +48,19 @@ atomic_switch() {
 }
 # The service is already restarted when this runs; a slow start is retried, but a
 # crash loop fails fast. The quota ledger must be untouched by the release switch.
+# The health contract is the complete response — HTTP 200 and exactly this body —
+# so a line match cannot accept a page that also carries something else.
 api_health() {
-  local i
+  local i body status
   for i in $(seq 1 20); do
-    if curl --noproxy '*' -fsS --max-time 5 "$health" 2>/dev/null | grep -qx '{"account":null}'; then
-      [[ $(sqlite3 "$data/auth.sqlite" 'SELECT count(*) FROM users;') == "$users_before" ]] || {
-        echo 'Account count changed during publish' >&2; return 1; }
-      return 0
+    if body=$(curl --noproxy '*' -sS --max-time 5 -w '\n%{http_code}' "$health" 2>/dev/null); then
+      status=${body##*$'\n'}
+      body=${body%$'\n'*}
+      if [[ "$status" == 200 && "$body" == '{"account":null}' ]]; then
+        [[ $(sqlite3 "$data/auth.sqlite" 'SELECT count(*) FROM users;') == "$users_before" ]] || {
+          echo 'Account count changed during publish' >&2; return 1; }
+        return 0
+      fi
     fi
     sleep 1
   done
