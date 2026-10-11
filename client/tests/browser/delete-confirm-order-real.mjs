@@ -45,7 +45,7 @@ try{
  await two.waitForFunction(key=>JSON.parse(localStorage.getItem(key)||'[]').length===0,GENERATIONS_KEY);
  release();
  await one.waitForFunction(()=>!document.querySelector('.generated-image'));
- await one.waitForTimeout(300);await Promise.all(pending);
+ await one.waitForFunction(()=>!document.querySelector('.modal-copy'));await Promise.all(pending);
  const ui=await two.evaluate(()=>({detail:document.querySelector('.generated-image')?document.querySelector('.section-title')?.textContent:null,modal:document.querySelector('.modal-copy')?.textContent,errors:[...document.querySelectorAll('.error')].map(e=>e.textContent),notices:[...document.querySelectorAll('.notice')].map(e=>e.textContent)}));
  const result={noBC:process.env.NO_BC==='1',cookieOwner,nativeLocks:true,fixtures,selections,requests,responses,server:store.gallerySnapshot(a.id),ui,pageErrors:errors};
  console.log('REAL_RESULT '+JSON.stringify(result));
@@ -58,6 +58,7 @@ try{
  assert.equal(store.countImages(a.id),0,'both explicitly selected and confirmed account images must be gone');
  for(const p of [one,two]){
   assert.equal(await p.locator('.gallery-card').count(),0,'old revision3 must not restore a displayed card');
+  assert.equal(await p.locator('.error').count(),0,'superseded successful deletion must not be reported as a failure');
   assert.deepEqual(await p.evaluate(key=>JSON.parse(localStorage.getItem(key)||'[]'),GENERATIONS_KEY),[]);
  }
  console.log('REAL_TWO_REQUESTS_REVERSED_200_PASS');

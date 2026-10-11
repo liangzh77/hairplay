@@ -298,7 +298,7 @@ async function removeAlbumItems(items:DeleteTarget[],identityCurrent:()=>boolean
    lastDelete=result;cloudIds.push(id);cloudImages.value=cloudSnapshotImages(result);
   }catch(e){
    if(!identityCurrent())return staleResult();
-   if(e instanceof StaleResponse){void syncCloudAlbum();return {ok:false,message:'删除请求结果已被较新相册版本替代，请核对刷新后的相册；未确认的目标可重新选择。'};}
+   if(e instanceof StaleResponse){void syncCloudAlbum();return wanted.length>1?{ok:false,message:'本批删除结果已被较新相册版本替代，请核对刷新后的相册；尚未提交的目标可重新选择。'}:staleResult();}
    failure=`云端删除未完成：已完成 ${cloudIds.length}/${wanted.length} 张；${e instanceof Error?e.message:'请稍后重试。'}`;break;
   }
  }
@@ -306,7 +306,7 @@ async function removeAlbumItems(items:DeleteTarget[],identityCurrent:()=>boolean
  const {ok,message}=await commitGenerations(list=>{if(lastDelete)rememberGallery(lastDelete);return list.filter(r=>!localIds.has(r.id)&&!(r.cloud&&cloudIds.includes(r.cloud)));},current);
  if(!current()){
   if(!identityCurrent())return staleResult();
-  void syncCloudAlbum();return {ok:false,message:`${failure?failure+'；':''}删除结果已被较新相册版本替代，请核对刷新后的相册。`};
+  void syncCloudAlbum();return failure?{ok:false,message:failure}:staleResult();
  }
  return !ok?{ok:false,message:`${failure?failure+'；':''}${cloudIds.length?'图片已从账户删除，但本机缓存未能清除':'本机缓存未能清除'}：${message}`} :failure?{ok:false,message:failure}:{ok:true,message:''};}
 function showInfo(message:string){info.value=message;modal.value='info';}
