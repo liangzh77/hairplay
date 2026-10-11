@@ -42,11 +42,21 @@ scripts/deploy-api.sh <版本号> [switch]   # 版本号形如 20261011T012345Z�
 
 信号回归另运行 `python3 scripts/test_api_remote_signals.py`（Linux，仅临时目录，须与主发布演练一样的依赖/权限）：用完整 publisher 验 PID TERM 与进程组 TERM/HUP/INT 四例，均须拒绝、回滚、保留失败树且清理健康临时文件。发布脚本显式 signal→rollback，不依赖被中断子进程的 ERR；测试子进程重置默认信号，避免 nohup 的 inherited ignore 令 HUP/INT 探针无效。53 项主演练与这 4 例分别计数。
 
-`/hairplay/api/*` 之外没有 `/health` 路由（直接访问 404），线上健康检查只认 `/hairplay/api/session`。发布顺序固定为**先 API、后静态**。已提交但未发布的 v2 会话 context/revision 合同见 [SYNC_CONTRACT.md](SYNC_CONTRACT.md)：旧前端可忽略新增字段并继续兼容的读/原子编辑，但无 context 的 generate/import/logout 将要求刷新新 UI（428），不承诺旧无头操作具有新身份保证。新 UI 依赖 v2 metadata，API 回退需同时协调 UI 回退。本轮尚未批准发布。
+`/hairplay/api/*` 之外没有 `/health` 路由（直接访问 404），线上健康检查只认 `/hairplay/api/session`。发布顺序固定为**先 API、后静态**。已发布的 v2 会话 context/revision 合同见 [SYNC_CONTRACT.md](SYNC_CONTRACT.md)：旧前端可忽略新增字段并继续兼容的读/原子编辑，但无 context 的 generate/import/logout 将要求刷新新 UI（428），不承诺旧无头操作具有新身份保证。新 UI 依赖 v2 metadata，API 回退需同时协调 UI 回退。本轮已获独立验收及用户发布授权。
 
 SC-R1 数据库回退边界：`sessions` 保持三列，context 在附属表；未发布 da2 四列中间库先原子转存 context 再移除该列。实际 e18dda7/2f9a748 旧模块业务往返可回退，旧代码资源写入由持久 SQL 触发器递增 revision，再升级不重置版本。回退只切 current/重启，**不恢复 auth-before 备份、不删除附属表或触发器**。旧 API 不提供 v2 身份/revision 响应，静态需一同协调回退，再升级后重新核验会话/资源；任意其他回退代码（尤其未发布 da2 中间服务）不在已验证范围。详细表结构、旧端支持范围见 SYNC_CONTRACT。
 
 新增业务护栏：`node --test server/rollback-compat.test.mjs` 在干净 checkout 内覆盖三列旧库及四列中间库、六进程迁移/context、真实位置 INSERT、退出/过期清理、旧资源 ABA/删除及再升级；`python3 scripts/test_api_rollback_migration.py` 在 Linux `/tmp` 使用完整未修改 publisher，强制新健康失败，验证真实旧 AuthStore 正确码登录/退出/再登录、账户/图库写入和再升级，备份与当前新写入都保留（6 成员 API fixture，不冒充产品 34 成员包）。`scripts/fixtures/rollback-auth-2f9a748.mjs` 是 `2f9a748:server/auth.mjs` 的逐字节测试副本，不进 API 允许清单；可用 `HAIRPLAY_TEST_OLD_AUTH` 指向隔离 git 导出模块做额外实验，不指向生产目录。健康 200/users 不变不能替代这一业务护栏。
+
+## 2026-10-11 同步 v2 发布记录
+
+- 固定产品源码 `6ff9294d4e9df19db159bbb959aab3b122f187bf`；Sol medium 实施、Astra high 最终独立 **APPROVE**，干净 archive 完整浏览器回归首次 14/14。用户随后明确授权提交、推送、部署。
+- API 与 H5 release 均为 **`20261011T153158Z`**，按先 API 后静态发布。API 包 34 文件，静态 47 文件；远端 `HTTP_OK files=47 SHA-256 matches; metadata_404=53`。本地与远端 checker/publisher 字节相同。
+- 原 API `20261010T005434Z`、原静态 `20261010T072634Z` 保留。数据库备份 `/var/lib/hairplay/backups/auth-before-api-20261011T153158Z.sqlite` 为 root:root 0600；与备份逐行比较 users/jobs 不变，完整性检查 ok，sessions 仍三列、4 个同步相关表就绪，原数据库 inode/0600/hairplay 所有权不变。服务 active/running，检查时 NRestarts=0。
+- 主站隐私 v1.2 单独发布为 `hairplay-privacy-20261011T153158Z`，只替换 privacy/index.html，其余 241 文件逐字节不变。go-sites 合并远端已有提交后推送 `3903ae5`，未覆盖他人改动，也未部署无关页面更新。Caddy 配置与 Vias current 均未变；无 Caddy reload。
+- 公网匿名 session 为 HTTP 200、原始 body `{"account":null}`。真实 Chrome 360/390 宽度检查发现页、样图详情、两区画廊、登录表单、隐私弹窗，pageerror/HTTP失败/API写请求均为 0。没有调用真实 SMTP/Ark、上传照片或使用真实账户。
+- 发布证据：`/tmp/hairplay-production-20261011T153158Z/`；最终独立报告：`/tmp/hairplay-sync-contract/review5/REVIEW.md`。人工真实邮箱与实体跨设备验证仍待用户完成，不以自动化替代。
+- 若回退，先使用旧静态自己的清单 `/tmp/hairplay-deploy-20261010T072634Z/manifest.json` 校验并切换旧静态，再协调 API 回退；不恢复整份数据库备份，不删除新表/触发器。保留现有隐私说明。
 
 ## 服务器位置与路由
 
