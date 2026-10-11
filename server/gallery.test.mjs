@@ -29,6 +29,15 @@ const cookieFor=(store,email,ip)=>'hairplay='+login(store,email,ip);
 const userOf=(store,cookie)=>store.session(cookie.slice('hairplay='.length));
 const post=(base,path,body,cookie,headers={})=>fetch(base+path,{method:'POST',headers:{origin,'content-type':'application/json',...(cookie?{cookie}:{}),...headers},body:JSON.stringify(body)});
 
+test('generation binds the new client confirmation to the shared-cookie account',async t=>{
+ let calls=0;const {store,server}=app(t,{fetchImpl:async()=>{calls++;return upstream();}}),base=await start(server);
+ const cookie=cookieFor(store,'bound-b@example.invalid','bound-b'),user=userOf(store,cookie);
+ const rejected=await post(base,'/api/generate',{photo:data,styleId:'catalog-53-1'},cookie,{'x-hairplay-account':'bound-a@example.invalid'});
+ assert.equal(rejected.status,409);assert.equal(calls,0);assert.equal(store.countImages(user.id),0);assert.equal(store.remaining(user.id),3);
+ const accepted=await post(base,'/api/generate',{photo:data,styleId:'catalog-53-1'},cookie,{'x-hairplay-account':user.email});
+ assert.equal(accepted.status,200);assert.equal(calls,1);assert.equal(store.countImages(user.id),1);assert.equal(store.remaining(user.id),2);
+});
+
 test('favorites HTTP accepts exactly one valid operation, never mixed or extra keys',async t=>{
  const {store,server}=app(t),base=await start(server),cookie=cookieFor(store,'contract@example.invalid','contract');
  for(const body of [null,[],{}, {ids:[],add:'dracula'}, {ids:[],add:'dracula',remove:'catalog-53-1'}, {add:'dracula',unexpected:true}, {ids:'bad',remove:'dracula'}, {ids:'bad'}, {add:[]}, {remove:42}, {unexpected:true}])assert.equal((await post(base,'/api/favorites',body,cookie)).status,400,JSON.stringify(body));

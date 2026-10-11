@@ -228,23 +228,26 @@ export async function pickPhoto(onReading?:()=>void):Promise<Photo|null>{
  return new Promise((resolve,reject)=>uni.chooseImage({count:1,sizeType:['original'],sourceType:['album','camera'],success:async(res)=>{onReading?.();try{const f=(res.tempFiles as UniApp.ChooseImageSuccessCallbackResultFile[])[0];const path=res.tempFilePaths[0];const ext=path.split('.').pop()?.toLowerCase();const type=ext==='png'?'image/png':ext==='webp'?'image/webp':ext==='jpg'||ext==='jpeg'?'image/jpeg':'';const info=await uni.getImageInfo({src:path});const error=validatePhoto({size:f.size,type,width:info.width,height:info.height});if(error)throw new Error(error);resolve({url:path,width:info.width,height:info.height});}catch(e){reject(e);}},fail:(e)=>e.errMsg.includes('cancel')?resolve(null):reject(new Error('无法读取照片，请重试'))}));
  // #endif
 }
-export async function generateLiveImage(photo:Photo,styleId:string,requirements:string):Promise<{image:string;cloud:string}>{
+export async function generateLiveImage(photo:Photo,styleId:string,requirements:string,current:()=>boolean=()=>true,owner?:string):Promise<{image:string;cloud:string}>{
  // #ifdef H5
  // The file picker MIME may be wrong (e.g. HEIC/PNG bytes named .jpg). The image
  // has already been decoded for preview; re-encode those pixels as real JPEG.
  // This also strips EXIF/GPS metadata and bounds the upload dimensions.
  const img=new Image();img.src=photo.url;
  try{await img.decode();}catch{throw new Error('浏览器无法解码这张照片，请换一张 JPG、PNG 或 WebP');}
+ if(!current())throw new Error('账户已变更，照片未发送');
  const scale=Math.min(1,2048/Math.max(img.naturalWidth,img.naturalHeight));
  const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(img.naturalWidth*scale));canvas.height=Math.max(1,Math.round(img.naturalHeight*scale));
  const ctx=canvas.getContext('2d');if(!ctx)throw new Error('浏览器无法处理照片');
  ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(img,0,0,canvas.width,canvas.height);
  const jpeg=await new Promise<Blob>((resolve,reject)=>canvas.toBlob(blob=>blob?.type==='image/jpeg'?resolve(blob):reject(new Error('照片转换为 JPG 失败')),'image/jpeg',0.88));
  canvas.width=0;canvas.height=0;
+ if(!current())throw new Error('账户已变更，照片未发送');
  if(jpeg.size>8*1024*1024)throw new Error('转换后的照片超过 8 MB，请选择较小图片');
  const dataUrl=await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(new Error('无法读取照片'));reader.readAsDataURL(jpeg);});
+ if(!current())throw new Error('账户已变更，照片未发送');
  let response:Response;
- try{response=await fetch(import.meta.env.BASE_URL+'api/generate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({photo:dataUrl,styleId,requirements})});}
+ try{response=await fetch(import.meta.env.BASE_URL+'api/generate',{method:'POST',headers:{'content-type':'application/json',...(owner?{'x-hairplay-account':owner}:{})},body:JSON.stringify({photo:dataUrl,styleId,requirements})});}
  catch{throw new Error('本机 AI 服务未启动；照片没有发送到火山云');}
  if(response.status===404)throw new Error('AI 服务未配置：请先启动本机服务；照片没有发送到火山云');
  const result=await response.json().catch(()=>({error:'服务返回异常'}));

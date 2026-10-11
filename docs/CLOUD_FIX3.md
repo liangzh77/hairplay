@@ -32,6 +32,20 @@
 
 ## 放行条件
 
-独立 **Astra high** 完整复验仍待完成；若指定模型不可用立即报告，不换模型。REJECT 必须返工，不允许生产发布；APPROVE 后也必须按先 API、后静态，并等待隐私签署。
+独立 **Astra high** 对 `6a49586` 已完成并给出 **REJECT**，完整报告 `/tmp/hairplay-cloud-fix3/independent/REVIEW3.md`；发现 R1–R5，原指定反例通过不豁免新窗口。返工后仍须指定 Astra high 完整独立复验；模型不可用立即报告，不换模型。不得生产发布。
+
+## R1–R5 返工实测（未放行）
+
+- R1：将 guard 传入照片重编码函数，decode/toBlob/FileReader 后、实际 POST 前检查。新客户端还发送 `X-HairPlay-Account`，服务端在读照片/调用上游/预留额度前拒绝与当前 Cookie 账户不符的确认（409）；无该头的旧客户端仍兼容。真实 API 观测 `requests=[], upstreamCalls=0, A_images=0, B_images=0, B_remaining=3`。
+- R2：通过 BroadcastChannel（不可用时用独立无身份内容的 localStorage 信号键）在账号动作开始及结束通知所有标签失效/重新读会话；账户缓存 owner 不同的 storage 事件先核验会话。真实共享 Cookie B 登录后放行 A 200：`privateModal=0, generationStorageChanged=false, lateTabAWrites=[]`，A 服务端图仍完成，未谎报任务取消。
+- R3：收藏读/写代次防止旧 GET 覆盖已确认的原子编辑；同一账户同步合并为串行+dirty 重读，避免丢失首次成功采纳的捕获项清理。真实 API `server=[], cards=0, cached=[]`。
+- R4：相册读/写代次在生成、导入、删除成功时失效旧 GET 与旧下载缓存任务；真实 API 放行旧空 GET 后 `serverImages=1, cards=1, remaining=2`。
+- R5：信号显式进入 `rollback 1`，不再依赖 `trap false` 触发 ERR。Linux `test_api_remote_signals.py` 用完整 publisher、真实临时 SQLite/HTTP，PID TERM、进程组 TERM/HUP/INT 四种均回滚，失败树保留、健康临时文件均 0。测试子进程先重置默认信号，避免 nohup 驱动继承的 ignored HUP/INT 把探针变成无效测试。主发布演练仍 53 PASS / 0 FAIL，信号是另外 4 例，不混称 57 条主演练断言。把 publisher 单独换回 `6a49586` 的原文件、新信号护栏完整执行到总结：PID TERM/组 INT PASS，组 TERM/HUP FAIL，rc=1，证明新护栏确实拒绝旧实现（`r5-signals-negative.log`）。
+
+反例提升为提交内 `account-adversarial.mjs`（从独立 fake-only 探针迁入）和 `real-account-races.mjs`（真实 createApp/SQLite/Cookie，只有上游 fake-only）；浏览器整套 7/7。原“并行匿名标签在另一标签登录后仍保持匿名”护栏已按共享会话真实语义调整：新登录会传播，采纳期间并发本机独有项用真实 Web Lock 写入验证，仅清捕获项、不清新增项。跨标签旧结果护栏允许正确实现不发迟到的 session 刷新，仍在真实旧 200 放行后检查弹窗和 setter，并非靠等待不存在的旧行为假通过。
+
+日志：`r1-r5-browser.log`、`repair-real-account-races.log`、`r5-signals-final.log`、`r5-rehearsal-final.log`、`r5-linux-sha.log`。Linux 新演练只在 `/tmp/hairplay-fix3-r5-1791698593/`，不触碰生产。返工本地 typecheck、client 25/25、server 连续三次各 27/27（新增期望账户头真实 HTTP 回归）、release 13、dev-security、H5 47 文件/40 资产、小程序 53 文件/40 资产及 browser 7/7 已实测。最终提交还须干净 git archive 复跑，再交独立复验。
+
+最终 `6a49586` 的干净归档复跑已完成，`clean-final-summary.log` 全部 rc=0；基线最终新护栏完整报告 8 失败（之前文中 7 是新增 B 挂起用例之前的旧版本），不将这些计数当成互相独立根因数。
 
 人工仍需验证：真实邮件投递/登录；明确同意的一次真实生成及额度；两设备同邮箱相册、删除和收藏传播；隐私 v1.2 签署。小程序账户接入、开发者工具及真机验收未做。没有执行任何真实生产发布或改变生产服务/配置。

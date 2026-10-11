@@ -40,6 +40,8 @@ scripts/deploy-api.sh <版本号> [switch]   # 版本号形如 20261011T012345Z�
 
 `switch <id> <manifest> <checker>` 只做「校验目标发布树 → 原子切换 → 重启 → 探活」，用于回滚。旧版本目录和失败目录都保留（失败时给出路径便于排查），**同一版本号不能重复发布**，重发必须换新 id。`HAIRPLAY_API_ROOT|DATA|SECRETS|RESTART|HEALTH` 只用于隔离演练（`python3 scripts/test_api_remote_publish.py`，Linux 上跑，共 53 项断言：happy publish、覆盖拒绝、错误响应体/多一行/NUL 后缀/尾随换行/尾随空行/非 200 健康失败回滚、依赖重装、备份与软链接、篡改包与含密钥清单拒绝、switch 回滚/前滚等），**禁止在生产主机上设置**。演练里的 stub 服务把 stub restarter 写进健康文件的**原始字节**直接吐回来，所以演练验的是发布脚本真正看到的响应；注意 stub restarter 的 `case` 模式必须写成 `"$broken")` 这类单个带引号展开——`"releases/""$id"")` 在 bash 5.2 上会因为空串引号导致模式永不匹配并静默落入健康分支，使这些断言全部失效。
 
+信号回归另运行 `python3 scripts/test_api_remote_signals.py`（Linux，仅临时目录，须与主发布演练一样的依赖/权限）：用完整 publisher 验 PID TERM 与进程组 TERM/HUP/INT 四例，均须拒绝、回滚、保留失败树且清理健康临时文件。发布脚本显式 signal→rollback，不依赖被中断子进程的 ERR；测试子进程重置默认信号，避免 nohup 的 inherited ignore 令 HUP/INT 探针无效。53 项主演练与这 4 例分别计数。
+
 `/hairplay/api/*` 之外没有 `/health` 路由（直接访问 404），线上健康检查只认 `/hairplay/api/session`。发布顺序固定为**先 API、后静态**：旧前端会忽略新增的响应字段，而新前端依赖新的 `POST /api/gallery/*`，先发 API 才不会出现 404 窗口。
 
 ## 服务器位置与路由

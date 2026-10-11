@@ -77,11 +77,13 @@ cleanup() {
   return 0
 }
 rollback() {
-  local status=$?
+  local status=${1:-$?}
   trap - ERR
   trap '' HUP INT TERM
   if [[ "$switched" == 1 ]]; then
     echo "Publish failed; restoring $old_target" >&2
+    # A signal may interrupt atomic_switch before it removes its temporary link.
+    [[ -z "$link_dir" ]] || { rm -rf -- "$link_dir"; link_dir=''; }
     atomic_switch "$old_target" || { echo 'ROLLBACK SWITCH FAILED' >&2; exit 1; }
     bash -c "$restart" || true
     api_health || { echo 'ROLLBACK HEALTH CHECK FAILED' >&2; exit 1; }
@@ -92,7 +94,9 @@ rollback() {
 }
 trap cleanup EXIT
 trap rollback ERR
-trap 'false' HUP INT TERM
+# A group signal also terminates curl/sleep. Never rely on a subsequent ERR
+# trap: bash may go directly to EXIT. Invoke the rollback entry explicitly.
+trap 'rollback 1' HUP INT TERM
 
 if [[ "$mode" == deploy ]]; then
   [[ -f "$archive" && ! -e "$release" && ! -L "$release" ]] || {
@@ -142,8 +146,9 @@ else
   python3 "$checker" verify-api-release "$release" "$manifest"
 fi
 
-atomic_switch "releases/$id"
+# Arm rollback before mv: a signal immediately after mv must not miss the switch.
 switched=1
+atomic_switch "releases/$id"
 bash -c "$restart"
 api_health
 trap - ERR

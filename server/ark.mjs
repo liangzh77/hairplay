@@ -83,6 +83,9 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
   if(!post.includes(route)||req.method!=='POST'){json(res,404,{error:'Not found'});return;}
   if(route==='/api/auth/logout'){auth.logout(token(req));res.setHeader('set-cookie',cookie(''));json(res,200,{ok:true});return;}
   if((route==='/api/generate'||route==='/api/auth/gender'||route==='/api/gallery/delete'||route==='/api/gallery/import'||route==='/api/favorites')&&!user){json(res,401,{error:'请先使用邮箱登录'});return;}
+  // New clients bind the confirmation to the account seen before photo encoding.
+  // Keep old clients compatible, but never charge another shared-cookie account.
+  if(route==='/api/generate'&&req.headers['x-hairplay-account']!==undefined&&req.headers['x-hairplay-account']!==user.email){json(res,409,{error:'账户已变更，请重新确认生成；本次未调用上游或扣额度'});return;}
   const limit=route==='/api/generate'?requestLimit:route==='/api/gallery/import'?imageLimit:route==='/api/favorites'?8192:2048;
   if(Number(req.headers['content-length'])>limit){json(res,413,{error:'请求过大'});return;}
   const chunks=[];let size=0;let job;let ownsActive=false;

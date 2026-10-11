@@ -16,7 +16,20 @@ const state=ref(loadState());const generations=ref<GeneratedRecord[]>(loadGenera
 // cloud pictures downloaded but not writable to this device's storage (they still
 // render), and `importedPointers` links a picture imported in this session to its
 // account copy when the local cache write failed.
-let accountEpoch=0;
+let accountEpoch=0,favoriteWriteEpoch=0,favoriteSyncEpoch=0,albumWriteEpoch=0,albumSyncEpoch=0;
+function markAlbumWrite(){albumWriteEpoch++;albumSyncEpoch++;}
+let favoriteSyncSlot={epoch:0,busy:false,dirty:false};
+let accountChannel:BroadcastChannel|undefined;
+const ACCOUNT_SIGNAL='hairplay.account.signal.v1';
+function announceAccount(phase:'changing'|'settled'){
+ const signal={phase,nonce:Math.random()};
+ try{if(accountChannel)accountChannel.postMessage(signal);else if(typeof localStorage!=='undefined')localStorage.setItem(ACCOUNT_SIGNAL,JSON.stringify(signal));}
+ catch{authMessage.value='跨标签页账户通知失败，请关闭其它标签页后登录或退出。';}
+}
+function receiveAccountSignal(signal:unknown){const phase=(signal as {phase?:string}|null)?.phase;if(phase!=='changing'&&phase!=='settled')return;
+ invalidateAccount();authMessage.value='账户在其它标签页变更；旧结果已隐藏。原账户已受理的任务可能仍会完成，可重新登录原账户核对。';
+ if(phase==='settled')void refreshAccount().then(syncAccount);
+}
 const accountFavorites=ref<SavedStyle[]>([]);
 const favorites=computed(()=>account.value?accountFavorites.value:state.value.favorites);
 function accountGuard(){const epoch=accountEpoch,owner=account.value?.email;return ()=>epoch===accountEpoch&&!!owner&&account.value?.email===owner;}
@@ -56,11 +69,12 @@ async function refreshAccount():Promise<boolean>{const epoch=accountEpoch;try{co
 // re-reads both from the server, so a deletion made on another device wins.
 async function syncAccount(){if(!account.value)return;await Promise.all([syncFavoritesWithAccount(),syncCloudAlbum()]);}
 onMounted(()=>{if(typeof document!=='undefined')document.addEventListener('input',captureAuthInput,true);stopImageCache=setupImageCache();
+ if(typeof BroadcastChannel!=='undefined'){accountChannel=new BroadcastChannel('hairplay.account');accountChannel.onmessage=event=>receiveAccountSignal(event.data);}
  void refreshAccount().then(syncAccount);
  // Another tab may add or delete local records; re-read instead of trusting a stale snapshot.
  if(typeof window!=='undefined')window.addEventListener('storage',syncLocalStores);});
-onUnmounted(()=>{clearInterval(cooldownTimer);stopImageCache();if(typeof document!=='undefined')document.removeEventListener('input',captureAuthInput,true);if(typeof window!=='undefined')window.removeEventListener('storage',syncLocalStores);});
-function syncLocalStores(){generations.value=loadGenerations();state.value=loadState();if(account.value)void syncFavoritesWithAccount();}
+onUnmounted(()=>{accountChannel?.close();clearInterval(cooldownTimer);stopImageCache();if(typeof document!=='undefined')document.removeEventListener('input',captureAuthInput,true);if(typeof window!=='undefined')window.removeEventListener('storage',syncLocalStores);});
+function syncLocalStores(event?:StorageEvent){if(event?.key===ACCOUNT_SIGNAL){try{receiveAccountSignal(JSON.parse(event.newValue||'null'));}catch{}return;}generations.value=loadGenerations();state.value=loadState();if(account.value){if(state.value.accountFavorites&&state.value.accountFavorites.owner!==account.value.email)void refreshAccount().then(syncAccount);else void syncFavoritesWithAccount();}}
 watch(album,rows=>{if(generatedDetail.value)generatedDetail.value=rows.find(r=>r.id===generatedDetail.value?.id||!!r.cloud&&r.cloud===generatedDetail.value?.cloud)||null;});
 watch([tab,account],()=>{void nextTick().then(()=>{if(typeof document==='undefined')return;
  document.querySelector('#auth-email input')?.setAttribute('autocomplete','email');
@@ -79,14 +93,14 @@ async function authAction(action:'code'|'login'|'logout'){if(authBusy.value||(ac
  authBusy.value=true;try{
  // The account is about to change, so anything still in flight belongs to the
  // account the user is leaving: make it unusable before it can be applied.
- if(action!=='code')invalidateAccount();
+ if(action!=='code'){invalidateAccount();announceAccount('changing');}
  await accountApi('auth/'+action,body);
  if(action==='code'){authMessage.value='验证码发送请求已受理，请查看收件箱和垃圾箱；10分钟内有效。';cooldown.value=60;clearInterval(cooldownTimer);cooldownTimer=setInterval(()=>{cooldown.value--;if(cooldown.value<=0)clearInterval(cooldownTimer);},1000);}
  else{code.value='';lastTyped.code=null;if(!await refreshAccount())return;
   if(action==='login'&&!account.value)throw new Error('未建立登录状态，请重试');
   signupGender.value=null;cloudImages.value=null;generations.value=loadGenerations();state.value=loadState();
   authMessage.value=(action==='logout'?'已退出登录':'登录成功')+'；账户变更前已受理的请求可能仍在原账户完成，旧结果不会在此显示，可重新登录原账户核对。';void syncAccount();}
- }catch(e){authMessage.value=e instanceof Error?e.message:'登录失败';}finally{authBusy.value=false;}}
+ }catch(e){authMessage.value=e instanceof Error?e.message:'登录失败';}finally{authBusy.value=false;if(action!=='code')announceAccount('settled');}}
 async function chooseGender(gender:Gender){
  if(authBusy.value)return;
  if(!account.value){signupGender.value=gender;return;}
@@ -118,11 +132,15 @@ function orderFavorites(ids:string[],local:SavedStyle[]):SavedStyle[]{
 async function updateFavorites(style:Style,add:boolean):Promise<{ok:boolean;message:string}>{
  const label=add?`已收藏「${style.name}」`:`已取消收藏「${style.name}」`;
  if(account.value){
-  const current=accountGuard(),owner=account.value.email;
+  const accountCurrent=accountGuard(),write=++favoriteWriteEpoch,owner=account.value.email;
+  favoriteSyncEpoch++;
+  const current=()=>accountCurrent()&&write===favoriteWriteEpoch;
   let ids:string[];
   try{ids=await cloudEditFavorite(add?'add':'remove',style.id);}
   catch(e){return current()?{ok:false,message:e instanceof Error?e.message:'收藏未保存，请稍后重试。'}:staleResult();}
   if(!current())return staleResult();
+  // Drop all GET snapshots taken before this acknowledged atomic edit.
+  favoriteSyncEpoch++;
   const cached=loadState().accountFavorites;
   const next=orderFavorites(ids,cached?.owner===owner?cached.items:accountFavorites.value);
   const written=await mutateState(latest=>{requireCurrent(current);return {...latest,accountFavorites:{owner,items:next}};});
@@ -156,7 +174,10 @@ async function toggleFavorite(style:Style){if(loading.value)return;
 // the one adopted here.
 async function syncFavoritesWithAccount(){
  if(!account.value)return;
- const current=accountGuard(),owner=account.value.email;
+ if(favoriteSyncSlot.epoch!==accountEpoch)favoriteSyncSlot={epoch:accountEpoch,busy:false,dirty:false};
+ const slot=favoriteSyncSlot;if(slot.busy){slot.dirty=true;return;}slot.busy=true;
+ const accountCurrent=accountGuard(),write=favoriteWriteEpoch,sync=++favoriteSyncEpoch,owner=account.value.email;
+ const current=()=>accountCurrent()&&write===favoriteWriteEpoch&&sync===favoriteSyncEpoch;
  try{const {ids,initialized}=await cloudFavorites();
   if(!current())return;
   let wanted=ids,clearIds:string[]=[],conflict=false;
@@ -175,47 +196,48 @@ async function syncFavoritesWithAccount(){
   if(!current())return;
   state.value=loadState();accountFavorites.value=next;
   favoriteMessage.value=(!written.ok?`收藏已从账户同步，但本机缓存未更新：${written.message}`:'')+(conflict?'账户中已有收藏列表，已采用账户中的列表；本机独有收藏仍保留。':'');}
- catch(e){if(current())favoriteMessage.value=e instanceof Error?`收藏暂未同步：${e.message}`:'收藏暂未同步';}}
+ catch(e){if(current())favoriteMessage.value=e instanceof Error?`收藏暂未同步：${e.message}`:'收藏暂未同步';}
+ finally{slot.busy=false;if(slot.dirty){slot.dirty=false;if(slot===favoriteSyncSlot&&account.value)void syncFavoritesWithAccount();}}}
 // The account album is authoritative; a picture that is not in it was deleted on
 // another device and must not be re-shown from this browser's cache. A response
 // that arrives after signing out belongs to the account the user left and is
 // dropped instead of replacing the signed-out view.
 async function syncCloudAlbum(){
  if(!account.value)return;
- const epoch=accountEpoch,current=accountGuard();
+ const epoch=accountEpoch,accountCurrent=accountGuard(),write=albumWriteEpoch,sync=++albumSyncEpoch;
+ const current=()=>accountCurrent()&&write===albumWriteEpoch&&sync===albumSyncEpoch;
  try{const images=await cloudAlbum();
-  if(epoch!==accountEpoch||!account.value)return;
+  if(!current())return;
   cloudImages.value=images;cloudMessage.value='';
   const live=new Set(images.map(i=>i.id));
   if(generations.value.some(r=>r.cloud&&!live.has(r.cloud)))await commitGenerations(list=>list.filter(r=>!r.cloud||live.has(r.cloud)),current);
-  void cacheCloudImages(images,epoch);}
- catch(e){if(epoch===accountEpoch&&account.value)cloudMessage.value=e instanceof Error?`云端相册暂未同步：${e.message}`:'云端相册暂未同步';}}
+  if(current())void cacheCloudImages(images,epoch,current);}
+ catch(e){if(current())cloudMessage.value=e instanceof Error?`云端相册暂未同步：${e.message}`:'云端相册暂未同步';}}
 // The 2K original stays on the server; the browser caches a downscaled copy so
 // the gallery renders instantly (and still renders when the network is down). A
 // cached copy that no longer decodes is downloaded again rather than shown as a
 // broken image, and a copy that cannot be written to this device's storage is
 // still rendered from memory — refusing the persistent write must not hide a
 // picture the account does hold.
-async function cacheCloudImages(images:CloudImage[],epoch:number){
- const current=accountGuard();
+async function cacheCloudImages(images:CloudImage[],epoch:number,current:()=>boolean=accountGuard()){
  for(const img of images){
-  if(epoch!==accountEpoch||!account.value)return;
+  if(!current())return;
   const cached=generations.value.find(r=>r.cloud===img.id);
   if(cached&&await verifyGeneratedImage(cached.image))continue;
   if(!current()||epoch!==accountEpoch)return;
   let stored='';
   try{const raw=await cloudImageData(img.id);stored=await prepareGeneratedImage(raw);
    if(!await verifyGeneratedImage(stored))stored='';}
-  catch(e){if(epoch===accountEpoch)cloudMessage.value=e instanceof Error?`云端原图暂未缓存到本机（${e.message}）；图片仍保存在您的账户中。`:'云端原图暂未缓存到本机；图片仍保存在您的账户中。';continue;}
-  if(!stored){if(epoch===accountEpoch)cloudMessage.value='云端返回的图片无法在本机显示，图片仍保存在账户中。';continue;}
-  if(epoch!==accountEpoch||!account.value)return;
+  catch(e){if(current())cloudMessage.value=e instanceof Error?`云端原图暂未缓存到本机（${e.message}）；图片仍保存在您的账户中。`:'云端原图暂未缓存到本机；图片仍保存在您的账户中。';continue;}
+  if(!stored){if(current())cloudMessage.value='云端返回的图片无法在本机显示，图片仍保存在账户中。';continue;}
+  if(!current())return;
   const {ok,message}=await commitGenerations(list=>{
    const at=list.findIndex(r=>r.cloud===img.id);
    // A cached copy that no longer decodes must be REPLACED, not kept: leaving the
    // broken bytes in place would keep rendering a picture the browser cannot show.
    if(at<0)return insertGeneration(list,makeGeneratedRecord(img.name,stored,img.id));
    const next=[...list];next[at]={...list[at],name:img.name,image:stored};return next;},()=>current()&&epoch===accountEpoch);
-  if(epoch!==accountEpoch)return;
+  if(!current())return;
   if(ok)memoryImages.value=Object.fromEntries(Object.entries(memoryImages.value).filter(([id])=>id!==img.id));
   else{memoryImages.value={...memoryImages.value,[img.id]:stored};cloudMessage.value=`云端图片已下载，但本机缓存未能写入：${message}可打开这张图片用「下载云端原图」保存到本机。`;}
  }
@@ -229,7 +251,7 @@ async function removeAlbumItems(items:AlbumItem[]):Promise<{ok:boolean;message:s
  const current=items.some(i=>i.cloud)?accountGuard():()=>true;
  const cloudIds=items.filter(i=>i.cloud).map(i=>i.cloud as string);
  if(cloudIds.length){
-  for(const id of cloudIds)try{await cloudDelete(id);if(!current())return staleResult();}catch(e){return current()?{ok:false,message:`云端删除未完成：${e instanceof Error?e.message:'请稍后重试。'}`}:staleResult();}
+  for(const id of cloudIds)try{await cloudDelete(id);if(!current())return staleResult();markAlbumWrite();}catch(e){return current()?{ok:false,message:`云端删除未完成：${e instanceof Error?e.message:'请稍后重试。'}`}:staleResult();}
   if(cloudImages.value)cloudImages.value=cloudImages.value.filter(i=>!cloudIds.includes(i.id));
  }
  const localIds=new Set([...items.filter(i=>!i.cloud).map(i=>i.id),...cloudIds,...Object.keys(importedPointers.value).filter(id=>cloudIds.includes(importedPointers.value[id]))]);
@@ -262,10 +284,11 @@ function start(){error.value='';if(!account.value){error.value='请先到「个�
  // account's lifetime quota: ask the user to free a slot before uploading.
  if((cloudImages.value?.length||0)>=CLOUD_LIMIT){error.value=`云端相册已满（最多 ${CLOUD_LIMIT} 张），请先到「画廊」删除一张再生成；本次不会消耗额度。`;return;}// A photo still being read is not a missing photo: pickPhoto() only sets it once the picture has been decoded and measured.
  if(picking.value){error.value='照片正在读取，请稍候再试';return;}if(!photo.value){error.value='请先上传您的照片';return;}modal.value='confirmUpload';}
-async function generate(){if(!account.value)return;const current=accountGuard();closeModal();loading.value=true;liveImage.value='';error.value='';try{
+async function generate(){if(!account.value)return;const current=accountGuard(),owner=account.value.email;closeModal();loading.value=true;liveImage.value='';error.value='';try{
  if(!photo.value)throw new Error('请先上传您的照片');
-  else{const {image,cloud}=await generateLiveImage(photo.value,detail.value?.id||'catalog-53-1',requirements.value);
+  else{const {image,cloud}=await generateLiveImage(photo.value,detail.value?.id||'catalog-53-1',requirements.value,current,owner);
   if(!current())return;
+  markAlbumWrite();
   const name=detail.value?.name||catalog.find(s=>s.id==='catalog-53-1')?.name||'AI 发型';liveName.value=name;
   let stored='',failure='';
   try{stored=await prepareGeneratedImage(image);if(!await verifyGeneratedImage(stored))failure='生成结果无法再次读取';}catch{failure='本机压缩失败';}
@@ -322,6 +345,7 @@ async function syncToCloud(item:AlbumItem){if(item.cloud)return;
  const current=accountGuard();
  try{const saved=await cloudImport(item.image,item.name);
   if(!current())return;
+  markAlbumWrite();
   // Remember the link in memory first: when the local cache write fails the
   // account really does hold the picture, and the album shows one row for it
   // instead of a local duplicate. The cloud import is content-addressed, so

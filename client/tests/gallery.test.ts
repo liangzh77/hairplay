@@ -26,14 +26,14 @@ test('the account album is authoritative and its pictures are cached locally',()
  assert.match(ui,/async function syncCloudAlbum\(\)/);
  assert.match(ui,/const images=await cloudAlbum\(\);/);
  // A response for the account the user just left is dropped, not rendered.
- assert.match(ui,/if\(epoch!==accountEpoch\|\|!account\.value\)return;\s*cloudImages\.value=images;cloudMessage\.value='';/);
+ assert.match(ui,/if\(!current\(\)\)return;\s*cloudImages\.value=images;cloudMessage\.value='';/);
  // A cached picture that is gone from the account is purged, so a deletion made
  // on another device can never be resurrected by this browser's cache.
  assert.match(ui,/generations\.value\.some\(r=>r\.cloud&&!live\.has\(r\.cloud\)\)&&await commitGenerations\(list=>list\.filter\(r=>!r\.cloud||live\.has\(r\.cloud\)\)\)/);
  assert.match(ui,/const cached=new Map\(generations\.value\.filter\(r=>r\.cloud\)/);
  assert.match(ui,/for\(const r of generations\.value\)\{\s*if\(r\.cloud\)continue;/);
  assert.match(ui,/if\(!list\.some\(i=>i\.cloud===linked\)\)list\.push/);
- assert.match(ui,/async function cacheCloudImages\(images:CloudImage\[\],epoch:number\)/);
+ assert.match(ui,/async function cacheCloudImages\(images:CloudImage\[\],epoch:number,current:\(\)=>boolean=accountGuard\(\)\)/);
  // A cached copy that no longer decodes is downloaded again instead of shown broken.
  assert.match(ui,/const cached=generations\.value\.find\(r=>r\.cloud===img\.id\);\s*if\(cached&&await verifyGeneratedImage\(cached\.image\)\)continue;/);
  assert.match(ui,/const raw=await cloudImageData\(img\.id\);stored=await prepareGeneratedImage\(raw\)/);
@@ -148,7 +148,7 @@ test('AI records can be deleted from the gallery and from the detail screen',()=
  // A second tab must re-read storage instead of overwriting it with a stale snapshot,
  // and a failed write must resync the UI from storage instead of faking success.
  assert.match(ui,/window\.addEventListener\('storage',syncLocalStores\)/);
- assert.match(ui,/function syncLocalStores\(\)\{generations\.value=loadGenerations\(\);state\.value=loadState\(\)/);
+ assert.match(ui,/function syncLocalStores\(event\?:StorageEvent\)/);
  assert.match(ui,/if\(!ok\)\{error\.value=message;return;\}/);
  assert.match(ui,/尚未保存，请先点击「下载这张」。/);
  assert.match(ui,/@click="downloadLive\(\)">下载这张/);
