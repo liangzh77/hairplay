@@ -135,11 +135,15 @@ test('templates are favourited, synced with the account and removable',()=>{
 
 test('AI records can be deleted from the gallery and from the detail screen',()=>{
  const ui=page();
- assert.match(ui,/async function removeAlbumItems\(items:AlbumItem\[\]\)/);
- // The account copy is deleted first: a failure there must keep the local copy too.
- assert.match(ui,/lastDelete=await cloudDelete\(id\);current=responseGuard\(lastDelete\);if\(!current\(\)\)return staleResult\(\)/);
- assert.match(ui,/云端删除未完成：/);
- assert.match(ui,/const \{ok,message\}=await removeAlbumItems\(items\)/);
+ assert.match(ui,/async function removeAlbumItems\(items:DeleteTarget\[\],identityCurrent:\(\)=>boolean\)/);
+ // Failed cloud targets retain their cache; only accepted successes enter cloudIds.
+ assert.match(ui,/const result=await cloudDelete\(id\);current=responseGuard\(result\);\s*if\(!current\(\)\)throw new StaleResponse\(\);\s*lastDelete=result;cloudIds.push\(id\)/);
+ assert.match(ui,/云端删除未全部完成（已完成/);
+ assert.match(ui,/const \{ok,message\}=await removeAlbumItems\(intent.items,intent.current\)/);
+ assert.match(ui,/type DeleteTarget=Pick<AlbumItem,'id'\|'name'\|'cloud'>/);
+ assert.match(ui,/items:items.map\(\(\{id,name,cloud\}\)=>\(\{id,name,cloud\}\)\)/);
+ assert.match(ui,/function clearAccountView\(\)\{deleteIntent.value=null;/);
+ assert.match(ui,/function closeModal\(\)\{deleteIntent.value=null;/);
  assert.match(ui,/图片已从账户删除，但本机缓存未能清除/);
  assert.match(ui,/function deleteGenerated\(\)/);
  assert.match(ui,/modal==='deleteGenerated'/);

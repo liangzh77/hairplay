@@ -308,7 +308,7 @@ async function removeAlbumItems(items:DeleteTarget[],identityCurrent:()=>boolean
   if(!identityCurrent())return staleResult();
   void syncCloudAlbum();return {ok:false,message:`${failure?failure+'；':''}删除结果已被较新相册版本替代，请核对刷新后的相册。`};
  }
- return !ok?{ok:false,message:`${failure?failure+'；':''}本机缓存未能清除：${message}`} :failure?{ok:false,message:failure}:{ok:true,message:''};}
+ return !ok?{ok:false,message:`${failure?failure+'；':''}${cloudIds.length?'图片已从账户删除，但本机缓存未能清除':'本机缓存未能清除'}：${message}`} :failure?{ok:false,message:failure}:{ok:true,message:''};}
 function showInfo(message:string){info.value=message;modal.value='info';}
 function closeModal(){deleteIntent.value=null;if(modal.value==='liveResult')liveImage.value='';modal.value='';}
 const dateOf=(value:string)=>new Date(value).toLocaleDateString();
