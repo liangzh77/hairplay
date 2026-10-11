@@ -1,4 +1,5 @@
 import {fixture,btn,nav,poll,browser,assert,STATE_KEY,bytes} from './real-fixture.mjs';
+import {repoPath} from './harness.mjs';
 const favorites=p=>p.locator('uni-button[aria-label^="收藏的模板"]');
 const state=p=>p.evaluate(()=>({cache:JSON.parse(localStorage.getItem('hairai.study.v1')).accountFavorites,writes:window.reviewWrites.length}));
 let failures=0,cases=0;
@@ -74,6 +75,24 @@ await check('unpersisted import link cannot recreate a cloud row after peer dele
   await q.locator('uni-button[aria-label^="AI 生成记录"]').filter({hasText:'云端'}).click();await btn(q,'删除这张').click();await btn(q,'确认删除').click();await poll(()=>store.countImages(a.id)===0);await poll(()=>held);
   await p.waitForTimeout(150);assert.equal(await p.locator('uni-button[aria-label^="AI 生成记录"]').count(),0);assert.equal(await p.locator('.result-image img').count(),0);
   console.log('PENDING_LINK_DELETE serverImages=0 cards=0 replacementHeld=true');
+ }finally{release?.();await f.close();}
+});
+for(const kind of ['download','generate'])await check('real context rejection quarantines '+kind+' after old-entry Cookie change without new broadcasts',async()=>{
+ const f=await fixture();let release;
+ try{
+  const {p,context,store,a,b,s}=f;const saved=store.addImage(a.id,{name:'error-path'},bytes);await p.reload({waitUntil:'networkidle'});
+  if(kind==='download'){await nav(p,'画廊');await p.locator('uni-button[aria-label^="AI 生成记录"]').click();}
+  else{await nav(p,'AI匹配');const chooser=p.waitForEvent('filechooser');await p.locator('uni-button').filter({hasText:'选择本地照片'}).click();await (await chooser).setFiles(repoPath('client/src/static/catalog/ai-catalog-44-0.jpg'));await p.locator('.photo-area').waitFor();}
+  const login=await p.evaluate(async body=>{const r=await fetch('api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});return r.status;},{email:b.email,code:f.codeB});assert.equal(login,200);
+  const cookie=(await context.cookies()).find(c=>c.name==='hairplay');assert.equal(store.session(cookie.value).email,b.email);
+  // Keep any healing session probe's real B200 held. A prior private display
+  // followed by quick refresh must not be mistaken for immediate isolation.
+  const gate=new Promise(r=>release=r);await p.route('**/api/session',async route=>{const response=await route.fetch();await gate;await route.fulfill({response}).catch(()=>{});});
+  let status,downloads=0;p.on('download',()=>downloads++);p.on('response',r=>{if(r.url().endsWith(kind==='download'?'api/gallery/'+saved.id:'api/generate'))status=r.status();});
+  if(kind==='download')await btn(p,'下载云端原图').click();else{await btn(p,'试试 AI 发型').click();await btn(p,'确认上传并生成').click();}
+  await poll(()=>status!==undefined);assert.equal(status,409);await p.waitForTimeout(200);if(kind==='download')assert.equal(await p.locator('.ai-badge').count(),0,'observed context mismatch must hide the old private detail before any session recovery');await nav(p,'画廊');
+  assert.equal(await p.locator('uni-button[aria-label^="AI 生成记录"]').count(),0);assert.equal(await p.locator('.result-image img').count(),0);assert.equal(downloads,0);assert.equal(s.upstreamCalls,0);assert.equal(store.remaining(b.id),3);
+  console.log('CONTEXT_REJECTION '+JSON.stringify({kind,status,cloudCards:0,downloads,upstream:s.upstreamCalls,B_remaining:3,recoveryHeld:true}));
  }finally{release?.();await f.close();}
 });
 console.log('SYNC_REVISIONS_REAL_COMPLETE cases='+cases+' failures='+failures);

@@ -11,8 +11,8 @@ import {loadState,pickPhoto,generateLiveImage,releasePhoto,lockModal,setupEscape
 // kept after signing out). `cloud` marks the former.
 interface AlbumItem {id:string;name:string;created:string;image:string;cloud?:string}
 const state=ref(loadState());const generations=ref<GeneratedRecord[]>(loadGenerations());const cloudImages=ref<CloudImage[]|null>(null);const cloudMessage=ref('');const favoriteMessage=ref('');const tab=ref('发现');const category=ref('所有风格');const query=ref('');const detail=ref<Style|null>(null);const favoriteDetail=ref<SavedStyle|null>(null);const generatedDetail=ref<AlbumItem|null>(null);const generationSaved=ref(true);const liveName=ref('');const photo=ref<Photo|null>(null);const picking=ref(false);const error=ref('');const notice=ref('');const loading=ref(false);const advanced=ref(false);const requirements=ref('');const color=ref('保持原色');const modal=ref('');const info=ref('');const selectMode=ref(false);const selected=ref<string[]>([]);const scrollTop=ref(0);let rememberedScroll=0;let currentScroll=0;
-// Account-scoped state must not survive a sign-in/sign-out. `accountEpoch` makes a
-// response that arrives after the account changed unusable, `memoryImages` holds
+// Account-scoped state must not survive a sign-in/sign-out. The coordinator binds
+// responses to a captured session context and resource revision; `memoryImages` holds
 // cloud pictures downloaded but not writable to this device's storage (they still
 // render), and `importedPointers` links a picture imported in this session to its
 // account copy when the local cache write failed.

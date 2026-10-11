@@ -5,10 +5,14 @@ export const accountSync=new AccountCoordinator();
 export const GALLERY_STAMP='hairplay.gallery.stamp.v2';
 const receipts=new WeakMap<object,{ticket:Ticket;resource:Resource;stamp:Stamp;data:object}>();
 const baselines=new WeakMap<Ticket,Partial<Record<Resource,string>>>();
-export function captureRequest(resource?:Resource){const ticket=accountSync.capture();if(resource)baselines.set(ticket,{[resource]:JSON.stringify(readStamp(resource))});return ticket;}
+export function captureRequest(resource?:Resource){const ticket=accountSync.capture();if(resource)baselines.set(ticket,{[resource]:cacheBinding(readStamp(resource))});return ticket;}
 let quarantine:()=>void=()=>{};
 export function onQuarantine(fn:()=>void){quarantine=fn;}
 export function quarantineAccount(){accountSync.invalidate();quarantine();}
+export function requireResponseIdentity(ticket:Ticket,data:{code?:string},status:number){
+ if(!accountSync.valid(ticket))throw new StaleResponse();
+ if(status===401||data.code==='CONTEXT_MISMATCH'||data.code==='SESSION_REQUIRED'){quarantineAccount();throw new StaleResponse();}
+}
 export function readStamp(resource:Resource):unknown {
  try{
   const raw=uni.getStorageSync(resource==='gallery'?GALLERY_STAMP:'hairai.study.v1');
@@ -17,12 +21,13 @@ export function readStamp(resource:Resource):unknown {
  }catch{return null;}
 }
 export function observeStorage(resource:Resource){const status=accountSync.observe(resource,readStamp(resource));if(status==='mismatch')quarantine();return status;}
+function cacheBinding(cache:unknown){const s=cache as Partial<Stamp>|null;return JSON.stringify(s?{owner:typeof s.owner==='string'?s.owner:null,context:typeof s.context==='string'?s.context:null}:null);}
 function conflicts(ticket:Ticket,cache:unknown){const s=cache as Partial<Stamp>|null;return !!s&&((typeof s.owner==='string'&&s.owner!==ticket.owner)||(typeof s.context==='string'&&s.context!==ticket.context));}
 export function acceptResponse<T extends object>(ticket:Ticket,resource:Resource,data:T,acknowledgement=false):T {
  if(!accountSync.valid(ticket))throw new StaleResponse();
  // Observe any greater peer revision even if the storage event has not arrived.
  const cached=readStamp(resource);
- if(conflicts(ticket,cached)&&JSON.stringify(cached)!==baselines.get(ticket)?.[resource]){quarantineAccount();throw new StaleResponse();}
+ if(conflicts(ticket,cached)&&cacheBinding(cached)!==baselines.get(ticket)?.[resource]){quarantineAccount();throw new StaleResponse();}
  if(validStamp(cached)&&cached.owner===ticket.owner&&cached.context===ticket.context)accountSync.observe(resource,cached);
  // A successful first adoption has a separate captured-ID cleanup obligation.
  // It may acknowledge the commit without authorizing an obsolete list/cache.
@@ -45,7 +50,7 @@ export function responseGuard(value:object):()=>boolean {
   if(!accountSync.valid(receipt.ticket))return false;
   const cached=readStamp(receipt.resource);
   if(conflicts(receipt.ticket,cached)){
-   if(JSON.stringify(cached)!==baseline){accountSync.invalidate();quarantine();return false;}
+   if(cacheBinding(cached)!==baseline){accountSync.invalidate();quarantine();return false;}
    return accountSync.permit(receipt.ticket,receipt.resource,receipt.stamp);
   }
   return accountSync.permit(receipt.ticket,receipt.resource,receipt.stamp,cached);

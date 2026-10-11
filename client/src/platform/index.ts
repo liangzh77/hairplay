@@ -1,7 +1,7 @@
 import {decodeState,decodeGenerations,isGeneratedRecord,isSavedStyle,FAVORITE_LIMIT,GENERATION_LIMIT,type State,type Gender,type GeneratedRecord,type SavedStyle,validatePhoto} from '../core/model';
 export type {Gender} from '../core/model';
 import {assetUrl} from '../core/assets';
-import {accountSync,captureRequest,boundHeaders,acceptResponse,attachReceipt,responseGuard,receiptData,quarantineAccount,StaleResponse} from './account-coordinator';
+import {accountSync,captureRequest,boundHeaders,acceptResponse,attachReceipt,responseGuard,receiptData,requireResponseIdentity,StaleResponse} from './account-coordinator';
 export {accountSync,responseGuard,receiptStamp,onQuarantine,observeStorage,rememberGallery,captureGuard,StaleResponse} from './account-coordinator';
 const KEY='hairai.study.v1';
 export function loadState(){try{return decodeState(uni.getStorageSync(KEY));}catch{return decodeState(null);}}
@@ -132,8 +132,7 @@ async function apiRequest(path:string,init:RequestInit={},accept:number[]=[200])
  let response:Response;try{response=await fetch(apiBase()+path,{credentials:'same-origin',cache:'no-store',...init,headers:{...init.headers,...(ticket?boundHeaders(ticket):{})}});}
  catch{throw Error('无法连接有型服务，请检查网络后重试');}
  const data=await response.json().catch(()=>({error:'服务返回异常'}));
- if(ticket&&!accountSync.valid(ticket))throw new StaleResponse();
- if(data.code==='CONTEXT_MISMATCH'||data.code==='SESSION_REQUIRED'){quarantineAccount();throw new StaleResponse();}
+ if(ticket)requireResponseIdentity(ticket,data,response.status);
  if(!response.ok&&!accept.includes(response.status))throw Error(typeof data.error==='string'&&data.error?data.error:response.status===401?'登录状态已失效，请重新登录':'服务暂不可用，请稍后重试');
  if(ticket&&resource)return acceptResponse(ticket,resource,data,path==='favorites'&&init.method==='POST'&&typeof init.body==='string'&&Array.isArray(JSON.parse(init.body).ids)&&data.ok===true);
  if(ticket&&path==='auth/gender'&&(data.owner!==ticket.owner||data.context!==ticket.context))throw new StaleResponse();
@@ -165,7 +164,7 @@ export async function cloudImageData(id:string):Promise<string>{
  // #ifdef H5
  const ticket=captureRequest('gallery');
  let response:Response;try{response=await fetch(apiBase()+'gallery/'+id,{credentials:'same-origin',cache:'no-store',headers:boundHeaders(ticket)});}catch{throw Error('无法连接有型服务，请检查网络后重试');}
- if(!response.ok)throw Error(response.status===404?'这张图片已不在云端账户中':'云端图片读取失败，请稍后重试');
+ if(!response.ok){requireResponseIdentity(ticket,await response.json().catch(()=>({})),response.status);throw Error(response.status===404?'这张图片已不在云端账户中':'云端图片读取失败，请稍后重试');}
  const receipt=acceptResponse(ticket,'gallery',{owner:response.headers.get('x-hairplay-owner'),context:response.headers.get('x-hairplay-context'),revision:Number(response.headers.get('x-hairplay-revision'))});
  const current=responseGuard(receipt);
  const blob=await response.blob();
@@ -269,6 +268,7 @@ export async function generateLiveImage(photo:Photo,styleId:string,requirements:
  catch{throw new Error('本机 AI 服务未启动；照片没有发送到火山云');}
  if(response.status===404)throw new Error('AI 服务未配置：请先启动本机服务；照片没有发送到火山云');
  const result=await response.json().catch(()=>({error:'服务返回异常'}));
+ requireResponseIdentity(ticket,result,response.status);
  if(!response.ok)throw new Error(typeof result.error==='string'?result.error:'AI 生成失败');
  if(typeof result.image!=='string'||!result.image.startsWith('data:image/jpeg;base64,'))throw new Error('生成图片无效');
  // The account id is what makes the picture visible on another device. A server
@@ -354,7 +354,7 @@ export async function downloadCloudImage(id:string,name:string,current:()=>boole
  // #ifdef H5
  const ticket=captureRequest('gallery');if(!current())throw new StaleResponse();
  let response:Response;try{response=await fetch(apiBase()+'gallery/'+id,{credentials:'same-origin',cache:'no-store',headers:boundHeaders(ticket)});}catch{throw Error('无法连接有型服务，请检查网络后重试');}
- if(!response.ok)throw Error(response.status===404?'这张图片已不在云端账户中':'云端原图下载失败，请稍后重试');
+ if(!response.ok){requireResponseIdentity(ticket,await response.json().catch(()=>({})),response.status);throw Error(response.status===404?'这张图片已不在云端账户中':'云端原图下载失败，请稍后重试');}
  const receipt=acceptResponse(ticket,'gallery',{owner:response.headers.get('x-hairplay-owner'),context:response.headers.get('x-hairplay-context'),revision:Number(response.headers.get('x-hairplay-revision'))});
  const accepted=responseGuard(receipt);
  const blob=await response.blob();
