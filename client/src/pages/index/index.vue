@@ -377,6 +377,9 @@ async function syncToCloud(item:AlbumItem){if(item.cloud)return;
  let current=accountGuard();
  try{const saved=await cloudImport(item.image,item.name);current=responseGuard(saved);
   if(!current())return;
+  // Publish the accepted authoritative snapshot BEFORE an unpersisted link can
+  // hide its local row while the cache writer waits for a native lock.
+  cloudImages.value=cloudSnapshotImages(saved);
   // Remember the link in memory first: when the local cache write fails the
   // account really does hold the picture, and the album shows one row for it
   // instead of a local duplicate. The cloud import is content-addressed, so
@@ -385,7 +388,6 @@ async function syncToCloud(item:AlbumItem){if(item.cloud)return;
   const live=new Set(cloudSnapshotImages(saved).map(i=>i.id));
   const {ok,message}=await commitGenerations(list=>{rememberGallery(saved);return list.filter(r=>!r.cloud||live.has(r.cloud)).map(r=>r.id===item.id?{...r,cloud:saved.id,...receiptStamp(saved)}:r);},current);
   if(!current())return;
-  cloudImages.value=cloudSnapshotImages(saved);
   // The detail screen holds a snapshot of the album row, so it must be refreshed
   // to the row that now carries the account id.
   const refreshed=album.value.find(i=>i.cloud===saved.id||i.id===item.id);if(refreshed)generatedDetail.value=refreshed;
