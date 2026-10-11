@@ -56,5 +56,9 @@ try{
  assert.deepEqual(ui.errors,[]);assert.deepEqual(errors,[]);
  // Product contract assertion: both explicit selected targets should be deleted.
  assert.equal(store.countImages(a.id),0,'both explicitly selected and confirmed account images must be gone');
+ for(const p of [one,two]){
+  assert.equal(await p.locator('.gallery-card').count(),0,'old revision3 must not restore a displayed card');
+  assert.deepEqual(await p.evaluate(key=>JSON.parse(localStorage.getItem(key)||'[]'),GENERATIONS_KEY),[]);
+ }
  console.log('REAL_TWO_REQUESTS_REVERSED_200_PASS');
 }finally{await f?.close();await browser.close();}

@@ -299,7 +299,7 @@ async function removeAlbumItems(items:DeleteTarget[],identityCurrent:()=>boolean
   }catch(e){
    if(!identityCurrent())return staleResult();
    if(e instanceof StaleResponse){void syncCloudAlbum();return {ok:false,message:'删除请求结果已被较新相册版本替代，请核对刷新后的相册；未确认的目标可重新选择。'};}
-   failure=`云端删除未全部完成（已完成 ${cloudIds.length}/${wanted.length} 张）：${e instanceof Error?e.message:'请稍后重试。'}`;break;
+   failure=`云端删除未完成：已完成 ${cloudIds.length}/${wanted.length} 张；${e instanceof Error?e.message:'请稍后重试。'}`;break;
   }
  }
  const localIds=new Set([...items.filter(i=>!i.cloud).map(i=>i.id),...cloudIds,...Object.keys(importedPointers.value).filter(id=>cloudIds.includes(importedPointers.value[id]))]);

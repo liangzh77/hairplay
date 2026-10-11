@@ -1,7 +1,7 @@
 // Deterministic confirmation windows, real HTTP/AuthStore/SQLite; no upstream calls.
 import {fixture,btn,nav,poll,browser,bytes,assert,GENERATIONS_KEY} from './real-fixture.mjs';
 import {readRepo} from './harness.mjs';
-const cases=['peer','get-held','get-failed','already-deleted','cancel','account-change','same-owner-login','single-failure','batch-peer','batch-partial'];
+const cases=['peer','get-held','get-failed','already-deleted','cancel','account-change','identity-held','same-owner-login','single-failure','batch-peer','batch-partial','batch-cancel'];
 async function run(kind){
  const f=await fixture({noBC:process.env.NO_BC==='1'});
  let release=()=>{};
@@ -22,20 +22,26 @@ async function run(kind){
    assert.match(await two.locator('.modal-title').innerText(),/2 张/);
   }else await open(two,'B');
   const contextBefore=(await two.evaluate(()=>JSON.parse(localStorage.getItem('hairplay.gallery.stamp.v2')))).context;
-  if(kind==='account-change'||kind==='same-owner-login'){
-   if(kind==='account-change')await f.change(one);
+  if(kind==='account-change'||kind==='identity-held'||kind==='same-owner-login'){
+   let probeSeen=false;
+   if(kind==='identity-held'){
+    const heldProbe=new Promise(r=>release=r);
+    await two.route('**/api/session',async route=>{probeSeen=true;await heldProbe;await route.continue();});
+   }
+   if(kind!=='same-owner-login')await f.change(one);
    else{
     await nav(one,'个人资料');await btn(one,'退出登录').click();await one.locator('.auth-message').filter({hasText:'已退出登录'}).waitFor();
     const code=store.issue(a.email,'relogin');
     await one.locator('#auth-email input').fill(a.email);await one.locator('#auth-code input').fill(code);await btn(one,'注册 / 登录').click();await one.locator('.auth-message').filter({hasText:'登录成功'}).waitFor();
    }
+   if(kind==='identity-held')await poll(()=>probeSeen);
    await poll(async()=>await two.locator('.modal-copy').count()===0);
-   assert.equal(await btn(two,'确认删除').count(),0);assert.equal(requests.length,0);assert.equal(store.countImages(a.id),2);
+   assert.equal(await btn(two,'确认删除').count(),0);release();assert.equal(requests.length,0);assert.equal(store.countImages(a.id),2);
    const cookie=(await context.cookies()).find(c=>c.name==='hairplay');assert.notEqual(store.session(cookie.value).context,contextBefore);
-  }else if(kind==='cancel'){
-   await btn(two,'取消').click();assert.equal(await btn(two,'确认删除').count(),0);assert.equal(requests.length,0);
+  }else if(kind==='cancel'||kind==='batch-cancel'){
+   await two.locator('.modal uni-button').filter({hasText:/^取消$/}).click();assert.equal(await btn(two,'确认删除').count(),0);assert.equal(requests.length,0);
    // Reopening must capture A, not the cancelled B.
-   await two.locator('[aria-label="返回"]').click();await open(two,'A');await btn(two,'确认删除').click();await poll(()=>store.countImages(a.id)===1);
+   if(kind==='batch-cancel')await btn(two,'取消').click();else await two.locator('[aria-label="返回"]').click();await open(two,'A');await btn(two,'确认删除').click();await poll(()=>store.countImages(a.id)===1);
    assert.equal(requests[0].id,A.id);assert.equal(store.listImages(a.id)[0].id,B.id);
   }else{
    let getSeen=false;
@@ -56,7 +62,7 @@ async function run(kind){
    await poll(async()=>await btn(two,'确认删除').count()===0);
    release();
    if(kind==='single-failure'||kind==='batch-partial'){
-    assert.match(await two.locator('.error').innerText(),/未全部完成/);
+    assert.match(await two.locator('.error').innerText(),/云端删除未完成：/);
     assert.equal(store.countImages(a.id),kind==='single-failure'?2:1);
     if(kind==='batch-partial'){assert.equal(store.listImages(a.id)[0].id,B.id);assert.match(await two.locator('.error').innerText(),/1\/2/);}
    }else{const count=kind==='already-deleted'?1:0;await poll(()=>store.countImages(a.id)===count);assert.equal(store.countImages(a.id),count);}
