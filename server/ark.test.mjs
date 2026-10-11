@@ -11,7 +11,7 @@ test('authenticated generation validates, strips metadata, enforces persistent b
  const {store,advance}=fixture(t);let calls=0,captured,fail=false,block,release;
  const app=createApp({config,auth:store,mailer:{send:async()=>{}},fetchImpl:async(url,options)=>{calls++;captured=JSON.parse(options.body);assert.equal(url,config.endpoint+'/images/generations');assert.equal(options.headers.authorization,'Bearer test-only-secret');if(block)await block;if(fail)throw Error('secret upstream stack');return new Response(JSON.stringify({data:[{b64_json:photo.toString('base64')}]}));}});
  const base=await start(app);t.after(()=>app.close());const token=login(store);const cookie='hairplay='+token;
- const send=(body,headers={})=>fetch(base+'/api/generate',{method:'POST',headers:{'content-type':'application/json',origin,cookie,...headers},body});
+ const send=(body,headers={})=>fetch(base+'/api/generate',{method:'POST',headers:{'content-type':'application/json',origin,cookie,'x-hairplay-context':store.session(token).context,...headers},body});
  assert.equal((await send(input,{origin:'https://evil.invalid'})).status,403);assert.equal((await send(input,{cookie:''})).status,401);assert.equal(calls,0);
  assert.equal((await send(JSON.stringify({photo:'data:text/plain;base64,SGk=',styleId:'catalog-53-1'}))).status,400);
  assert.equal((await send(JSON.stringify({photo:data,styleId:'other'}))).status,400);assert.equal(calls,0);
@@ -25,7 +25,7 @@ test('failed reservation cleanup cannot leave in-memory generation permanently b
  const {store}=fixture(t),token=login(store),cookie='hairplay='+token;let calls=0;
  const app=createApp({config,auth:store,mailer:{send:async()=>{}},fetchImpl:async()=>{calls++;if(calls===1)throw Error('upstream failure');return new Response(JSON.stringify({data:[{b64_json:photo.toString('base64')}]}));}});
  const base=await start(app);t.after(()=>app.close());
- const request=()=>fetch(base+'/api/generate',{method:'POST',headers:{origin,'content-type':'application/json',cookie},body:input});
+ const request=()=>fetch(base+'/api/generate',{method:'POST',headers:{origin,'content-type':'application/json',cookie,'x-hairplay-context':store.session(token).context},body:input});
  const original=store.finish;store.finish=(id,ok)=>{original.call(store,id,ok);throw Error('database is locked');};
  try{await request().catch(()=>{});}finally{store.finish=original;}
  assert.equal(calls,1);
@@ -46,17 +46,17 @@ test('HTTP login/session/logout, anti-CSRF, SMTP failure sanitization and subpat
  assert.equal((await post('auth/login',{email:'test@example.invalid',code:'wrong'})).status,400);
  assert.equal((await post('auth/login',{email:'test@example.invalid',code:lastCode,gender:'unexpected'})).status,400);
  assert.equal((await post('auth/gender',{gender:'male'})).status,401);
- const logged=await post('auth/login',{email:'test@example.invalid',code:lastCode,gender:'male'});assert.equal(logged.status,200);const set=logged.headers.get('set-cookie');assert.match(set,/HttpOnly/);assert.match(set,/Secure/);assert.match(set,/SameSite=Lax/);assert.match(set,/Path=\/hairplay\//);const cookie=set.split(';')[0];
- const session=await fetch(base+'/hairplay/api/session',{headers:{cookie}});assert.deepEqual(await session.json(),{account:{email:'test@example.invalid',gender:'male',remaining:3}});
+ const logged=await post('auth/login',{email:'test@example.invalid',code:lastCode,gender:'male'});assert.equal(logged.status,200);const set=logged.headers.get('set-cookie');assert.match(set,/HttpOnly/);assert.match(set,/Secure/);assert.match(set,/SameSite=Lax/);assert.match(set,/Path=\/hairplay\//);const cookie=set.split(';')[0],context=store.session(cookie.split('=')[1]).context;
+ const session=await fetch(base+'/hairplay/api/session',{headers:{cookie}});assert.deepEqual(await session.json(),{account:{email:'test@example.invalid',context,gender:'male',remaining:3}});
  assert.equal((await post('auth/gender',{gender:'female'},{cookie,origin:'https://evil.invalid'})).status,403);
  assert.equal((await post('auth/gender',{gender:'unexpected'},{cookie})).status,400);
  assert.equal((await post('auth/gender',{gender:null},{cookie})).status,200);
- assert.deepEqual(await fetch(base+'/hairplay/api/session',{headers:{cookie}}).then(r=>r.json()),{account:{email:'test@example.invalid',gender:null,remaining:3}});
+ assert.deepEqual(await fetch(base+'/hairplay/api/session',{headers:{cookie}}).then(r=>r.json()),{account:{email:'test@example.invalid',context,gender:null,remaining:3}});
  assert.equal((await post('auth/gender',{gender:'female'},{cookie})).status,200);
- assert.deepEqual(await fetch(base+'/hairplay/api/session',{headers:{cookie}}).then(r=>r.json()),{account:{email:'test@example.invalid',gender:'female',remaining:3}});
+ assert.deepEqual(await fetch(base+'/hairplay/api/session',{headers:{cookie}}).then(r=>r.json()),{account:{email:'test@example.invalid',context,gender:'female',remaining:3}});
  assert.equal((await fetch(base+'/hairplay/api/session',{headers:{cookie,origin:'https://evil.invalid'}})).status,403);
  assert.equal((await post('auth/logout',{}, {cookie,origin:'https://evil.invalid'})).status,403);
- assert.equal((await post('auth/logout',{}, {cookie})).status,200);
+ assert.equal((await post('auth/logout',{}, {cookie,'x-hairplay-context':context})).status,200);
  assert.deepEqual(await fetch(base+'/hairplay/api/session',{headers:{cookie}}).then(r=>r.json()),{account:null});
  fail=true;const failed=await post('auth/code',{email:'another@example.invalid'}); // IP cooldown applies even for new addresses.
  assert.equal(failed.status,429);
@@ -73,7 +73,7 @@ test('unexpected SQLite lock during session/logout returns 503 without crashing 
   assert.equal((await fetch(base+'/api/session',{headers:{cookie}})).status,503);
   store.session=savedSession;
   store.logout=()=>{throw Error('database is locked: private SQL details');};
-  const out=await fetch(base+'/api/auth/logout',{method:'POST',headers:{origin,'content-type':'application/json',cookie},body:'{}'});
+  const out=await fetch(base+'/api/auth/logout',{method:'POST',headers:{origin,'content-type':'application/json',cookie,'x-hairplay-context':store.session(token).context},body:'{}'});
   assert.equal(out.status,503);assert.ok(!(await out.text()).includes('private SQL details'));
  }finally{store.remaining=savedRemaining;store.logout=savedLogout;store.session=savedSession;}
  assert.equal((await fetch(base+'/api/session',{headers:{cookie}})).status,200);

@@ -2,7 +2,7 @@ import {assert,launchBrowser,startStatic,jpegDataUrl,readGenerations,readFavorit
 const jpeg=await jpegDataUrl(),realBytes=await readRepo('client/src/static/catalog/ai-catalog-53-0.jpg');
 const id='a'.repeat(24),created='2026-10-11T00:00:00.000Z',row={id,name:'Review cloud',created,style:null,size:realBytes.length};
 const record=(cloud=id)=>({id:'gen-review',name:'Review local',created,image:jpeg,source:'ai',...(cloud===undefined?{}:{cloud})});
-const account={email:'review@example.invalid',gender:null,remaining:2};
+const account={email:'review@example.invalid',context:'a'.repeat(32),gender:null,remaining:2};
 const server=await startStatic(),browser=await launchBrowser(),contexts=[];
 const btn=(p,text)=>p.locator('uni-button').filter({hasText:new RegExp('^'+text+'$')});
 const gallery=p=>p.locator('[aria-label="导航 画廊"]').click();
@@ -14,12 +14,18 @@ async function setup({records=[],noLocks=false,images=[row],favoriteState={ids:[
  const context=await browser.newContext({viewport:{width:390,height:844}});contexts.push(context);
  await context.addInitScript(({records,noLocks,key,localFavorites,stateKey})=>{if(!localStorage.getItem(key)){localStorage.setItem(key,JSON.stringify(records));localStorage.setItem(stateKey,JSON.stringify({version:1,favorites:localFavorites}));}window.storageWrites=[];const orig=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){window.storageWrites.push(k);return orig.call(this,k,v)};if(noLocks)Object.defineProperty(navigator,'locks',{configurable:true,value:undefined})},{records,noLocks,key:GENERATIONS_KEY,localFavorites,stateKey:STATE_KEY});
  const page=await context.newPage();page.setDefaultTimeout(5000);
- const state={session:account,images,imageGets:0,galleryStarted:false,favoritePosts:[],favoriteStarted:false,generateStarted:false,importCalls:0};
+ const state={loginGeneration:0,revisions:new Map(),session:account,images,imageGets:0,galleryStarted:false,favoritePosts:[],favoriteStarted:false,generateStarted:false,importCalls:0};
  const gate=new Promise(r=>state.release=r),fgate=new Promise(r=>state.releaseFavorite=r),ggate=new Promise(r=>state.releaseGeneration=r),igate=new Promise(r=>state.releaseImport=r),sgate=new Promise(r=>state.releaseSession=r),bgate=new Promise(r=>state.releaseOther=r);
  await context.route('**/api/**',async route=>{
- const req=route.request(),path=new URL(req.url()).pathname.split('/api/')[1];const json=(body,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
+ const req=route.request(),path=new URL(req.url()).pathname.split('/api/')[1],capturedSession=state.session;
+ const stamp=(resource,data)=>{const key=capturedSession.email+' '+resource,value=JSON.stringify(data),old=state.revisions.get(key),revision=old?old.revision+(old.value!==value?1:0):0;state.revisions.set(key,{value,revision});return {owner:capturedSession.email,context:capturedSession.context,revision};};
+ const json=(body,status=200)=>{
+  if('ids' in body)body={...body,...stamp('favorites',[body.ids,body.initialized])};
+  else if('images' in body||'id' in body||'record' in body){const images=body.images||[...state.images];body={...body,images,...stamp('gallery',images.map(i=>i.id))};}
+  return route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
+ };
  if(path==='session'){const captured=state.session;if(holdSession&&state.generateStarted){state.sessionStarted=true;await sgate;}return json({account:captured})}
- if(path==='auth/login'){state.session={...account,email:req.postDataJSON().email};return json({ok:true})}
+ if(path==='auth/login'){state.session={...account,email:req.postDataJSON().email,context:(++state.loginGeneration).toString(16).padStart(32,'0')};return json({ok:true})}
  if(path==='auth/logout'){state.session=null;return json({ok:true})}
  if(path==='favorites'){
   if(req.method()==='POST'){
@@ -35,10 +41,10 @@ async function setup({records=[],noLocks=false,images=[row],favoriteState={ids:[
   if(holdOtherFavorites&&state.session?.email==='other@example.invalid'){state.otherStarted=true;await bgate;return json({ids:['catalog-44-1'],initialized:true});}
   return json(favoriteState);
  }
- if(path==='gallery'){state.galleryStarted=true;const snapshot=[...state.images];if(holdGallery)await gate;return json({images:snapshot})}
+ if(path==='gallery'){state.galleryStarted=true;const snapshot=[...state.images],captured={images:snapshot,...stamp('gallery',snapshot.map(i=>i.id))};if(holdGallery)await gate;return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(captured)})}
  if(path==='gallery/import'){if(holdImport){state.importStarted=true;await igate;}state.importCalls++;if(!state.images.some(r=>r.id===id))state.images.push({...row});return json({id,created})}
  if(path==='generate'){state.generateStarted=true;if(holdGeneration)await ggate;state.images.push({...row});return json({image:jpeg,record:{id,created},remaining:1})}
- if(path.startsWith('gallery/')){state.imageGets++;return route.fulfill({status:200,contentType:'image/jpeg',body:realBytes})}
+ if(path.startsWith('gallery/')){state.imageGets++;const metadata=stamp('gallery',state.images.map(i=>i.id));return route.fulfill({status:200,contentType:'image/jpeg',headers:{'x-hairplay-owner':metadata.owner,'x-hairplay-context':metadata.context,'x-hairplay-revision':String(metadata.revision)},body:realBytes})}
  return json({},404);
  });
  await page.goto(server.url,{waitUntil:holdGallery?'domcontentloaded':'networkidle'});await waitFor(()=>state.galleryStarted);return {context,page,state};

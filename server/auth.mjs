@@ -43,6 +43,11 @@ export class AuthStore{
    // rehearsal, or a release from before the column existed) are migrated here.
    if(!this.db.prepare('PRAGMA table_info(gallery)').all().some(col=>col.name==='hash'))this.db.exec('ALTER TABLE gallery ADD COLUMN hash TEXT');
    this.db.exec('CREATE INDEX IF NOT EXISTS gallery_user_hash ON gallery(user,hash)');
+   if(!this.db.prepare('PRAGMA table_info(sessions)').all().some(col=>col.name==='context'))this.db.exec('ALTER TABLE sessions ADD COLUMN context TEXT');
+   const sessionContext=this.db.prepare('UPDATE sessions SET context=? WHERE hash=?');
+   for(const row of this.db.prepare('SELECT hash FROM sessions WHERE context IS NULL').all())sessionContext.run(randomBytes(16).toString('hex'),row.hash);
+   this.db.exec(`CREATE TABLE IF NOT EXISTS resource_revisions(user INTEGER PRIMARY KEY,favorites INTEGER NOT NULL DEFAULT 0,gallery INTEGER NOT NULL DEFAULT 0);
+    INSERT OR IGNORE INTO resource_revisions SELECT users.id,EXISTS(SELECT 1 FROM favorites WHERE user=users.id),EXISTS(SELECT 1 FROM gallery WHERE user=users.id) FROM users;`);
    // Backfill legacy pictures without changing their ids or bytes.
    const update=this.db.prepare('UPDATE gallery SET hash=? WHERE id=?');
    for(const row of this.db.prepare('SELECT id,bytes FROM gallery WHERE hash IS NULL').all())update.run(createHash('sha256').update(row.bytes).digest('hex'),row.id);
@@ -83,9 +88,9 @@ export class AuthStore{
   let user=this.db.prepare('SELECT * FROM users WHERE email=?').get(email);
   if(!user){if(this.db.prepare('SELECT count(*) n FROM users').get().n>=100)return null;this.db.prepare('INSERT INTO users(email,gender) VALUES(?,?)').run(email,gender);user=this.db.prepare('SELECT * FROM users WHERE email=?').get(email);}
   const token=randomBytes(32).toString('base64url');this.db.prepare('DELETE FROM sessions WHERE expires<=?').run(n);
-  this.db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(this.hash(token),user.id,n+7*86400000);return token;
+  this.db.prepare('INSERT INTO sessions(hash,user,expires,context) VALUES(?,?,?,?)').run(this.hash(token),user.id,n+7*86400000,randomBytes(16).toString('hex'));return token;
  });}
- session(token){if(!token||! /^[A-Za-z0-9_-]{43}$/.test(token))return null;return this.db.prepare('SELECT users.* FROM sessions JOIN users ON user=users.id WHERE hash=? AND expires>?').get(this.hash(token),this.now())||null;}
+ session(token){if(!token||! /^[A-Za-z0-9_-]{43}$/.test(token))return null;return this.db.prepare('SELECT users.*,sessions.context FROM sessions JOIN users ON user=users.id WHERE hash=? AND expires>?').get(this.hash(token),this.now())||null;}
  logout(token){if(token)this.db.prepare('DELETE FROM sessions WHERE hash=?').run(this.hash(token));}
  setGender(user,gender){if(!validGender(gender))throw Object.assign(Error('请选择男、女或不填写'),{status:400});this.db.prepare('UPDATE users SET gender=? WHERE id=?').run(gender,user);}
  recover(){this.db.prepare("UPDATE jobs SET state='failed' WHERE state='pending' AND created<?").run(this.now()-600000);}
@@ -110,43 +115,61 @@ export class AuthStore{
   if(this.db.prepare('SELECT count(*) n FROM gallery WHERE user=?').get(user).n>=GALLERY_LIMIT)throw Object.assign(Error('云端相册最多保存 '+GALLERY_LIMIT+' 张图片，请先删除一张再试'),{status:429});
   const id=randomBytes(12).toString('hex'),created=this.now();
   this.db.prepare('INSERT INTO gallery VALUES(?,?,?,?,?,?,?,?)').run(id,user,String(meta?.name||'AI 发型').slice(0,60)||'AI 发型',validStyleId(meta?.style)?meta.style:null,created,bytes.length,bytes,hash);
+  this.bump(user,'gallery');
   return {id,created};
  }
+ revision(user,resource){if(!['favorites','gallery'].includes(resource))throw Error('Unknown resource');return this.db.prepare(`SELECT ${resource} revision FROM resource_revisions WHERE user=?`).get(user)?.revision??0;}
+ bump(user,resource){
+  if(!['favorites','gallery'].includes(resource))throw Error('Unknown resource');
+  this.db.prepare('INSERT OR IGNORE INTO resource_revisions(user) VALUES(?)').run(user);
+  this.db.prepare(`UPDATE resource_revisions SET ${resource}=${resource}+1 WHERE user=?`).run(user);
+ }
+ #gallerySnapshot(user){return {images:this.listImages(user),revision:this.revision(user,'gallery')};}
+ gallerySnapshot(user){return this.tx(()=>this.#gallerySnapshot(user));}
+ #favoritesSnapshot(user){const ids=this.favorites(user);return {ids:ids??[],initialized:ids!==null,revision:this.revision(user,'favorites')};}
+ favoritesSnapshot(user){return this.tx(()=>this.#favoritesSnapshot(user));}
+ imageSnapshot(user,id){return this.tx(()=>({image:this.image(user,id),revision:this.revision(user,'gallery')}));}
  finishWithImage(id,meta,bytes){return this.tx(()=>{
   const row=this.db.prepare("SELECT user FROM jobs WHERE id=? AND state='pending'").get(id);
   if(!row)return null;
   const saved=this.#addImage(row.user,meta,bytes);
   this.db.prepare("UPDATE jobs SET state='success' WHERE id=? AND state='pending'").run(id);
-  return saved;});}
- addImage(user,meta,bytes){return this.tx(()=>this.#addImage(user,meta,bytes));}
+  return {...saved,...this.#gallerySnapshot(row.user)};});}
+ addImage(user,meta,bytes){return this.tx(()=>({...this.#addImage(user,meta,bytes),...this.#gallerySnapshot(user)}));}
  // Newest first; picture ids are random, so the rowid (insertion order) is the
  // tie-break: two pictures added in the same millisecond must not swap order
  // between reloads.
  listImages(user){return this.db.prepare('SELECT id,name,style,created,size FROM gallery WHERE user=? ORDER BY created DESC,rowid DESC').all(user);}
  image(user,id){return this.db.prepare('SELECT name,style,created,size,bytes FROM gallery WHERE id=? AND user=?').get(id,user)||null;}
- deleteImage(user,id){return this.db.prepare('DELETE FROM gallery WHERE id=? AND user=?').run(id,user).changes>0;}
+ deleteImage(user,id){return this.deleteImageSnapshot(user,id).deleted;}
+ deleteImageSnapshot(user,id){return this.tx(()=>{const deleted=this.db.prepare('DELETE FROM gallery WHERE id=? AND user=?').run(id,user).changes>0;if(deleted)this.bump(user,'gallery');return {deleted,...this.#gallerySnapshot(user)};});}
  countImages(user){return this.db.prepare('SELECT count(*) n FROM gallery WHERE user=?').get(user).n;}
  // `null` means the account never stored favourites (first sync adopts the local
  // list); `[]` means the account deliberately has none, so the empty list wins.
  favorites(user){const row=this.db.prepare('SELECT ids FROM favorites WHERE user=?').get(user);if(!row)return null;
   try{const ids=JSON.parse(row.ids);return Array.isArray(ids)?ids.filter(validStyleId).slice(0,FAVORITE_LIMIT):[];}catch{return [];}}
- setFavorites(user,ids){this.db.prepare('INSERT INTO favorites VALUES(?,?,?) ON CONFLICT(user) DO UPDATE SET ids=excluded.ids,updated=excluded.updated').run(user,JSON.stringify(ids),this.now());}
+ setFavorites(user,ids){return this.tx(()=>this.#setFavorites(user,ids));}
+ #setFavorites(user,ids){
+  const before=this.favorites(user);
+  this.db.prepare('INSERT INTO favorites VALUES(?,?,?) ON CONFLICT(user) DO UPDATE SET ids=excluded.ids,updated=excluded.updated').run(user,JSON.stringify(ids),this.now());
+  if(before===null||JSON.stringify(before)!==JSON.stringify(ids))this.bump(user,'favorites');
+ }
  // Adopting this device's list is only allowed while the account has no list of
  // its own. Afterwards every change is one atomic add/remove on the server's
  // current list, so two devices editing from stale snapshots cannot resurrect a
  // favourite the other one just removed.
  adoptFavorites(user,ids){return this.tx(()=>{
-  if(this.db.prepare('SELECT ids FROM favorites WHERE user=?').get(user))return {ids:this.favorites(user)??[],conflict:true};
-  const unique=[...new Set(ids)].slice(0,FAVORITE_LIMIT);this.setFavorites(user,unique);return {ids:unique,conflict:false};});}
+  if(this.db.prepare('SELECT ids FROM favorites WHERE user=?').get(user))return {...this.#favoritesSnapshot(user),conflict:true};
+  const unique=[...new Set(ids)].slice(0,FAVORITE_LIMIT);this.#setFavorites(user,unique);return {...this.#favoritesSnapshot(user),conflict:false};});}
  addFavorite(user,styleId){return this.tx(()=>{
   const current=this.favorites(user)??[];
-  if(current.includes(styleId))return {ids:current};
+  if(current.includes(styleId))return this.#favoritesSnapshot(user);
   if(current.length>=FAVORITE_LIMIT)throw Object.assign(Error('最多收藏 '+FAVORITE_LIMIT+' 个模板，请先取消一个'),{status:429});
-  const ids=[styleId,...current];this.setFavorites(user,ids);return {ids};});}
+  const ids=[styleId,...current];this.#setFavorites(user,ids);return this.#favoritesSnapshot(user);});}
  removeFavorite(user,styleId){return this.tx(()=>{
   const current=this.favorites(user)??[],ids=current.filter(id=>id!==styleId);
   // The row is written even when nothing changed, so the removal is recorded for
   // the other devices instead of leaving the account "never synced".
-  this.setFavorites(user,ids);return {ids};});}
+  this.#setFavorites(user,ids);return this.#favoritesSnapshot(user);});}
  close(){this.db.close();}
 }

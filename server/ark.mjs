@@ -56,36 +56,44 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
   const origin=req.headers.origin||'';
   if((origin&&!origins.includes(origin))||(req.method==='POST'&&(!origins.includes(origin)||req.headers['content-type']?.split(';')[0]!=='application/json'))){json(res,403,{error:'请求来源不允许'});return;}
   const user=auth.session(token(req));
+  const binding=user?{owner:user.email,context:user.context}:{};
+  const accountView=()=>user?{email:user.email,context:user.context,gender:user.gender??null,remaining:auth.remaining(user.id)}:null;
+  const galleryView=snapshot=>({...snapshot,images:snapshot.images.map(r=>({...r,created:new Date(r.created).toISOString()}))});
+  const boundRoute=['/api/generate','/api/auth/logout','/api/auth/gender','/api/gallery','/api/gallery/delete','/api/gallery/import','/api/favorites'].includes(route)||/^\/api\/gallery\/[0-9a-f]{24}$/.test(route);
+  if(boundRoute){
+   if(!user){json(res,401,{code:'SESSION_REQUIRED',error:'请先使用邮箱登录'});return;}
+   const expected=req.headers['x-hairplay-context'];
+   if(expected!==undefined&&expected!==user.context){json(res,409,{code:'CONTEXT_MISMATCH',error:'账户会话已变更，请重新核验；本次未执行操作'});return;}
+   if(expected===undefined&&['/api/generate','/api/gallery/import','/api/auth/logout'].includes(route)){json(res,428,{code:'CONTEXT_REQUIRED',error:'请刷新页面使用新版账户服务；本次未执行操作'});return;}
+   if(req.headers['x-hairplay-account']!==undefined&&req.headers['x-hairplay-account']!==user.email){json(res,409,{code:'CONTEXT_MISMATCH',error:'账户已变更，请重新确认；本次未执行操作'});return;}
+  }
   // Disabled by default. Enable only for an explicitly configured HTTPS reverse proxy
   // which overwrites X-Real-IP; local/dev callers cannot bypass the IP budget.
   const forwarded=trustLoopbackProxy&&secure&&req.socket.remoteAddress==='127.0.0.1'&&typeof req.headers['x-real-ip']==='string'&&/^[0-9a-fA-F:.]{3,45}$/.test(req.headers['x-real-ip'])?req.headers['x-real-ip']:req.socket.remoteAddress||'unknown';
-  if(route==='/api/session'&&req.method==='GET'){json(res,200,{account:user?{email:user.email,gender:user.gender??null,remaining:auth.remaining(user.id)}:null});return;}
+  if(route==='/api/session'&&req.method==='GET'){json(res,200,{account:accountView()});return;}
   // The account's cloud album. Only metadata is listed; the bytes are served one
   // picture at a time, ownership-checked, and never reach a shared cache.
   if(route==='/api/gallery'&&req.method==='GET'){
    if(!user){json(res,401,{error:'请先使用邮箱登录'});return;}
-   json(res,200,{images:auth.listImages(user.id).map(r=>({id:r.id,name:r.name,style:r.style,created:new Date(r.created).toISOString(),size:r.size}))});return;}
+   json(res,200,{...binding,...galleryView(auth.gallerySnapshot(user.id))});return;}
   const galleryId=req.method==='GET'?/^\/api\/gallery\/([0-9a-f]{24})$/.exec(route)?.[1]:undefined;
   if(galleryId){
    if(!user){json(res,401,{error:'请先使用邮箱登录'});return;}
-   const row=auth.image(user.id,galleryId);
+   const snapshot=auth.imageSnapshot(user.id,galleryId),row=snapshot.image;
    if(!row){json(res,404,{error:'Not found'});return;}
    const picture=Buffer.from(row.bytes);
    // The picture belongs to one account and is only served to it, so it must not
    // survive in the browser's HTTP cache: `no-store` means closing the session (or
    // signing out) really does end access to the bytes on that machine.
-   res.writeHead(200,{'content-type':'image/jpeg','content-length':String(picture.length),'cache-control':'private, no-store','x-content-type-options':'nosniff','referrer-policy':'no-referrer'});
+   res.writeHead(200,{'content-type':'image/jpeg','content-length':String(picture.length),'x-hairplay-owner':user.email,'x-hairplay-context':user.context,'x-hairplay-revision':String(snapshot.revision),'cache-control':'private, no-store','x-content-type-options':'nosniff','referrer-policy':'no-referrer'});
    res.end(picture);return;}
   if(route==='/api/favorites'&&req.method==='GET'){
    if(!user){json(res,401,{error:'请先使用邮箱登录'});return;}
-   const ids=auth.favorites(user.id);json(res,200,{ids:ids??[],initialized:ids!==null});return;}
+   json(res,200,{...binding,...auth.favoritesSnapshot(user.id)});return;}
   const post=['/api/generate','/api/auth/code','/api/auth/login','/api/auth/logout','/api/auth/gender','/api/gallery/delete','/api/gallery/import','/api/favorites'];
   if(!post.includes(route)||req.method!=='POST'){json(res,404,{error:'Not found'});return;}
   if(route==='/api/auth/logout'){auth.logout(token(req));res.setHeader('set-cookie',cookie(''));json(res,200,{ok:true});return;}
   if((route==='/api/generate'||route==='/api/auth/gender'||route==='/api/gallery/delete'||route==='/api/gallery/import'||route==='/api/favorites')&&!user){json(res,401,{error:'请先使用邮箱登录'});return;}
-  // New clients bind the confirmation to the account seen before photo encoding.
-  // Keep old clients compatible, but never charge another shared-cookie account.
-  if(route==='/api/generate'&&req.headers['x-hairplay-account']!==undefined&&req.headers['x-hairplay-account']!==user.email){json(res,409,{error:'账户已变更，请重新确认生成；本次未调用上游或扣额度'});return;}
   const limit=route==='/api/generate'?requestLimit:route==='/api/gallery/import'?imageLimit:route==='/api/favorites'?8192:2048;
   if(Number(req.headers['content-length'])>limit){json(res,413,{error:'请求过大'});return;}
   const chunks=[];let size=0;let job;let ownsActive=false;
@@ -95,7 +103,7 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
    const input=JSON.parse(Buffer.concat(chunks).toString('utf8')); 
    if(route==='/api/auth/gender'){
     if(!validGender(input.gender)){json(res,400,{error:'请选择男、女或不填写'});return;}
-    auth.setGender(user.id,input.gender);json(res,200,{ok:true});return;
+    auth.setGender(user.id,input.gender);json(res,200,{ok:true,...binding});return;
    }
    if(route==='/api/favorites'){
     if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).length!==1||!['ids','add','remove'].includes(Object.keys(input)[0])){json(res,400,{error:'收藏操作无效'});return;}
@@ -108,13 +116,13 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
     if(Array.isArray(input.ids)){
      if(input.ids.length>FAVORITE_LIMIT||!input.ids.every(validStyleId)){json(res,400,{error:'收藏列表无效'});return;}
      const adopted=auth.adoptFavorites(user.id,input.ids);
-     json(res,adopted.conflict?409:200,{ok:!adopted.conflict,ids:adopted.ids,initialized:true});return;
+     json(res,adopted.conflict?409:200,{ok:!adopted.conflict,...binding,ids:adopted.ids,initialized:adopted.initialized,revision:adopted.revision});return;
     }
     if((input.add!==undefined)===(input.remove!==undefined)){json(res,400,{error:'收藏操作无效'});return;}
     const styleId=input.add!==undefined?input.add:input.remove;
     if(!validStyleId(styleId)){json(res,400,{error:'收藏操作无效'});return;}
     try{const result=input.add!==undefined?auth.addFavorite(user.id,styleId):auth.removeFavorite(user.id,styleId);
-     json(res,200,{ok:true,ids:result.ids,initialized:true});return;}
+     json(res,200,{ok:true,...binding,...result});return;}
     catch(e){json(res,e.status||400,{error:e.message});return;}
    }
    if(route==='/api/gallery/delete'){
@@ -122,7 +130,7 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
     // a success for this device, and saying so is how the client avoids
     // resurrecting it from a stale local copy.
     if(typeof input.id!=='string'||!/^[0-9a-f]{24}$/.test(input.id)){json(res,400,{error:'图片编号无效'});return;}
-    json(res,200,{ok:true,deleted:auth.deleteImage(user.id,input.id)});return;
+    json(res,200,{ok:true,...binding,...galleryView(auth.deleteImageSnapshot(user.id,input.id))});return;
    }
    if(route==='/api/gallery/import'){
     const match=/^data:image\/jpeg;base64,([A-Za-z0-9+/]+={0,2})$/.exec(typeof input.image==='string'?input.image:'');
@@ -131,7 +139,7 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
     try{await sharp(bytes,{limitInputPixels:25_000_000}).stats();}catch{json(res,400,{error:'图片无法解码，已拒绝保存'});return;}
     let saved;try{saved=auth.addImage(user.id,{name:typeof input.name==='string'?input.name:'AI 发型',style:input.style},bytes);}
     catch(e){json(res,e.status||400,{error:e.status===429?e.message:'图片无法保存到云端'});return;}
-    json(res,200,{id:saved.id,created:new Date(saved.created).toISOString(),remaining:auth.remaining(user.id)});return;
+    json(res,200,{...binding,...galleryView(saved),created:new Date(saved.created).toISOString(),remaining:auth.remaining(user.id)});return;
    }
    const email=normalizeEmail(input.email);
    if(route==='/api/auth/code'){
@@ -147,7 +155,7 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
     const gender=input.gender===undefined?null:input.gender;
     if(!validGender(gender)){json(res,400,{error:'请选择男、女或不填写'});return;}
     const session=auth.verify(email,input.code,gender);if(!session){json(res,400,{error:'验证码无效、过期或暂无法注册，请重试'});return;}
-    res.setHeader('set-cookie',cookie(session));json(res,200,{ok:true});return;
+    res.setHeader('set-cookie',cookie(session));const logged=auth.session(session);json(res,200,{ok:true,account:{email:logged.email,context:logged.context,gender:logged.gender??null,remaining:auth.remaining(logged.id)}});return;
    }
    imageData(input.photo);
    const cleaned=await sharp(Buffer.from(input.photo.split(',')[1],'base64'),{limitInputPixels:25_000_000}).rotate().resize({width:2048,height:2048,fit:'inside',withoutEnlargement:true}).jpeg({quality:88}).toBuffer();
@@ -174,7 +182,7 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
    // One commit: consume the quota and keep the cloud copy of the generated
    // picture. `job=null` only after that commit, so a storage failure refunds it.
    const saved=auth.finishWithImage(job,{name:styleNames.get(input.styleId),style:input.styleId},result);job=null;
-   json(res,200,{image:'data:image/jpeg;base64,'+raw,remaining:auth.remaining(user.id),record:saved?{id:saved.id,created:new Date(saved.created).toISOString()}:null});
+   json(res,200,{...binding,...(saved?galleryView(saved):{}),image:'data:image/jpeg;base64,'+raw,remaining:auth.remaining(user.id),record:saved?{id:saved.id,created:new Date(saved.created).toISOString()}:null});
   }catch(e){json(res,e.status|| (job?502:400),{error:job?(e.status===429?e.message+'；本次未扣成功额度':'生成失败，请稍后重试；未扣成功额度'):e.status===429?e.message:'请求无效，请检查输入'});}
   finally{try{if(job)auth.finish(job,false);}finally{if(ownsActive)active=false;}}
   }catch{

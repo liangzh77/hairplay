@@ -26,21 +26,22 @@ test('the account album is authoritative and its pictures are cached locally',()
  assert.match(ui,/async function syncCloudAlbum\(\)/);
  assert.match(ui,/const images=await cloudAlbum\(\);/);
  // A response for the account the user just left is dropped, not rendered.
- assert.match(ui,/if\(!current\(\)\)return;\s*cloudImages\.value=images;cloudMessage\.value='';/);
+ assert.match(ui,/current=responseGuard\(images\);if\(!current\(\)\)return;/);
+ assert.match(ui,/if\(!current\(\)\)return;\s*cloudImages\.value=images;/);
  // A cached picture that is gone from the account is purged, so a deletion made
  // on another device can never be resurrected by this browser's cache.
- assert.match(ui,/generations\.value\.some\(r=>r\.cloud&&!live\.has\(r\.cloud\)\)&&await commitGenerations\(list=>list\.filter\(r=>!r\.cloud||live\.has\(r\.cloud\)\)\)/);
+ assert.match(ui,/commitGenerations\(list=>\{rememberGallery\(images\);return list\.filter\(r=>!r\.cloud\|\|live\.has\(r\.cloud\)\);\},current\)/);
  assert.match(ui,/const cached=new Map\(generations\.value\.filter\(r=>r\.cloud\)/);
  assert.match(ui,/for\(const r of generations\.value\)\{\s*if\(r\.cloud\)continue;/);
  assert.match(ui,/if\(!list\.some\(i=>i\.cloud===linked\)\)list\.push/);
- assert.match(ui,/async function cacheCloudImages\(images:CloudImage\[\],epoch:number,current:\(\)=>boolean=accountGuard\(\)\)/);
+ assert.match(ui,/async function cacheCloudImages\(images:CloudImage\[\],current:\(\)=>boolean\)/);
  // A cached copy that no longer decodes is downloaded again instead of shown broken.
  assert.match(ui,/const cached=generations\.value\.find\(r=>r\.cloud===img\.id\);\s*if\(cached&&await verifyGeneratedImage\(cached\.image\)\)continue;/);
  assert.match(ui,/const raw=await cloudImageData\(img\.id\);stored=await prepareGeneratedImage\(raw\)/);
  // A cached copy that still decodes is kept; one that no longer decodes is
  // replaced in place, and a missing one is inserted.
  assert.match(ui,/const cached=generations\.value\.find\(r=>r\.cloud===img\.id\);/);
- assert.match(ui,/if\(at<0\)return insertGeneration\(list,makeGeneratedRecord\(img\.name,stored,img\.id\)\);\s*const next=\[\.\.\.list\];next\[at\]=\{\.\.\.list\[at\],name:img\.name,image:stored\};return next;\},\(\)=>current\(\)\&\&epoch===accountEpoch\)/);
+ assert.match(ui,/if\(at<0\)return insertGeneration\(list,\{\.\.\.makeGeneratedRecord\(img\.name,stored,img\.id\),\.\.\.receiptStamp\(images\)\}\);\s*const next=\[\.\.\.list\];next\[at\]=\{\.\.\.list\[at\],name:img\.name,image:stored,\.\.\.receiptStamp\(images\)\};return next;\},current\)/);
  // The freshly downloaded copy wins over the cached bytes in the album too.
  assert.match(ui,/image:memoryImages\.value\[img\.id\]\|\|cached\.get\(img\.id\)\?\.image\|\|''/);
  // A picture the device cannot write to its own storage is still rendered from
@@ -57,7 +58,7 @@ test('the account album is authoritative and its pictures are cached locally',()
 
 test('successful generation is stored in the account and disclosed before upload',()=>{
  const ui=page(),layer=platform();
- assert.match(ui,/commitGenerations\(list=>insertGeneration\(list,record\),current\)/);
+ assert.match(ui,/commitGenerations\(list=>\{rememberGallery\(result\);return insertGeneration\(list\.filter\(r=>!r\.cloud\|\|live\.has\(r\.cloud\)\),record\);\},current\)/);
  assert.match(ui,/prepareGeneratedImage\(image\)/);
  assert.match(ui,/if\(current\)requireCurrent\(current\);return mutate\(list\)/);
  // Cross-tab writes are serialized with Web Locks when the runtime has them.
@@ -81,14 +82,14 @@ test('successful generation is stored in the account and disclosed before upload
  // quota, so a successful generation is always visible in the account.
  assert.match(ui,/生成结果会保存到您的云端账户——在其它设备登录同一邮箱也能看到——并在本机保留一份缓存/);
  assert.match(ui,/if\(failure\)\{generationSaved\.value=true;error\.value=`生成图片已显示，但/);
- assert.match(ui,/cloudImages\.value=\[\{id:cloud,name,style:detail\.value\?\.id\|\|null,created,size:0\}/);
+ assert.match(ui,/cloudImages\.value=cloudSnapshotImages\(result\)/);
  assert.match(layer,/const GEN_KEY='hairplay\.generations\.v1'/);
  assert.match(layer,/const KEY='hairai\.study\.v1'/);
  assert.match(layer,/export function storeGenerations/);
  assert.match(layer,/list\.every\(isGeneratedRecord\)/);
  assert.match(layer,/1080\/Math\.max\(img\.naturalWidth,img\.naturalHeight\)/);
  // The cloud link is the server id; a response without one is not guessed at.
- assert.match(layer,/return \{image:result\.image,cloud:typeof result\.record\?\.id==='string'&&\/\^\[0-9a-f\]\{24\}\$\/\.test\(result\.record\.id\)\?result\.record\.id:''\}/);
+ assert.match(layer,/return attachReceipt\(\{image:result\.image,cloud:typeof result\.record\?\.id==='string'&&\/\^\[0-9a-f\]\{24\}\$\/\.test\(result\.record\.id\)\?result\.record\.id:''\},result\)/);
  // A full account album is refused before the paid call, so a refused generation
  // never spends the account's lifetime quota.
  assert.match(ui,/if\(\(cloudImages\.value\?\.length\|\|0\)>=CLOUD_LIMIT\)\{error\.value=/);
@@ -105,12 +106,12 @@ test('templates are favourited, synced with the account and removable',()=>{
  assert.match(ui,/function isFavorite\(styleId:string\)/);
  assert.match(ui,/class="outline wide" :disabled="loading" @click="toggleFavorite\(detail\)">\{\{isFavorite\(detail\.id\)\?'★ 已收藏这个模板':'☆ 收藏这个模板'\}\}/);
  assert.match(ui,/async function syncFavoritesWithAccount\(\)/);
- assert.match(ui,/const \{ids,initialized\}=await cloudFavorites\(\)/);
+ assert.match(ui,/snapshot:object=await cloudFavorites\(\)/);
  // A brand-new account adopts the local list; an existing account list wins, and
  // the 409 answer to a stale adoption is adopted instead of overwritten.
- assert.match(ui,/const local=loadState\(\)\.favorites/);
- assert.match(ui,/const adopted=await cloudSaveFavorites\(local\.map\(f=>f\.styleId\)\)/);
- assert.match(ui,/if\(!conflict\)clearIds=local\.map/);
+ assert.match(ui,/const captured=loadState\(\)\.favorites/);
+ assert.match(ui,/const adopted=await cloudSaveFavorites\(captured\.map\(f=>f\.styleId\)\)/);
+ assert.match(ui,/const clearIds=conflict\?\[\]:captured\.map/);
  assert.match(ui,/const next=orderFavorites\(wanted,cached\?\.owner===owner\?cached\.items:accountFavorites\.value\)/);
  assert.match(layer,/export async function cloudFavorites\(\)/);
  assert.match(layer,/export async function cloudSaveFavorites\(ids:string\[\]\)/);
@@ -136,7 +137,7 @@ test('AI records can be deleted from the gallery and from the detail screen',()=
  const ui=page();
  assert.match(ui,/async function removeAlbumItems\(items:AlbumItem\[\]\)/);
  // The account copy is deleted first: a failure there must keep the local copy too.
- assert.match(ui,/await cloudDelete\(id\);if\(!current\(\)\)return staleResult\(\)/);
+ assert.match(ui,/lastDelete=await cloudDelete\(id\);current=responseGuard\(lastDelete\);if\(!current\(\)\)return staleResult\(\)/);
  assert.match(ui,/云端删除未完成：/);
  assert.match(ui,/const \{ok,message\}=await removeAlbumItems\(items\)/);
  assert.match(ui,/图片已从账户删除，但本机缓存未能清除/);

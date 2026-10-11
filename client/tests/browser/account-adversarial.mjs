@@ -4,7 +4,7 @@ const server=await startStatic(),browser=await launchBrowser(),contexts=[],issue
 const bytes=await readRepo('client/src/static/catalog/ai-catalog-53-0.jpg'),jpeg=await jpegDataUrl();
 const catalog=JSON.parse(await readRepo('client/src/core/catalog.json'));
 const A='a@example.invalid',B='b@example.invalid',created='2026-10-11T00:00:00.000Z',id='a'.repeat(24);
-const acct=email=>email?{email,gender:null,remaining:3}:null;
+const acct=(email,context)=>email?{email,context,gender:null,remaining:3}:null;
 const row={id,name:'PRIVATE-A',created,style:null,size:bytes.length};
 const fav=s=>{const x=catalog.find(x=>x.id===s);return {id:'fav-'+s,styleId:s,name:x.name,image:x.image,created}};
 const local=(cloud)=>({id:'gen-independent',name:'PRIVATE-A',created,image:jpeg,source:'ai',...(cloud?{cloud}: {})});
@@ -24,16 +24,17 @@ async function setup({session=A,favorites=['catalog-53-1'],records=[],state={},i
   window.writes=[];const set=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){window.writes.push(k);return set.call(this,k,v)};
   if(noLocks)Object.defineProperty(navigator,'locks',{configurable:true,value:undefined});
  },{state,records,noLocks});
- const s={session,favorites:{[A]:favorites,[B]:['catalog-44-1']},images:{[A]:images,[B]:[]},events:[],holds:{},gets:0,imports:0,generates:0,errors:[],downloads:0};
+ const s={contexts:{[A]:'a'.repeat(32),[B]:'b'.repeat(32)},loginGeneration:0,revisions:{[A]:{favorites:0,gallery:0},[B]:{favorites:0,gallery:0}},session,favorites:{[A]:favorites,[B]:['catalog-44-1']},images:{[A]:images,[B]:[]},events:[],holds:{},gets:0,imports:0,generates:0,errors:[],downloads:0};
  s.hold=key=>{let release;const gate=new Promise(r=>release=r);const h={gate,release,started:false,done:false};s.holds[key]=h;return h};
  await context.route('**/*',async route=>{
   const req=route.request(),u=new URL(req.url());if(u.origin!==server.origin)return route.abort();
   if(!u.pathname.includes('/api/'))return route.continue();
   const path=u.pathname.split('/api/')[1],method=req.method(),owner=s.session;const body=method==='POST'?req.postDataJSON():null;
   const event={path,method,owner,body};s.events.push(event);
+  const sessionContext=s.contexts[owner],beforeFavorites=JSON.stringify(s.favorites[owner]),beforeImages=JSON.stringify(s.images[owner]);
   let result={},status=200,picture=false;
-  if(path==='session')result={account:acct(owner)};
-  else if(path==='auth/login'){s.session=body.email;result={ok:true};}
+  if(path==='session')result={account:acct(owner,sessionContext)};
+  else if(path==='auth/login'){s.session=body.email;s.contexts[body.email]=(++s.loginGeneration).toString(16).padStart(32,'0');result={ok:true,account:acct(body.email,s.contexts[body.email])};}
   else if(path==='auth/logout'){s.session=null;result={ok:true};}
   else if(path==='auth/gender')result={ok:true};
   else if(path==='favorites'){
@@ -47,9 +48,17 @@ async function setup({session=A,favorites=['catalog-53-1'],records=[],state={},i
   else if(path==='gallery/delete'){s.images[owner]=[];result={deleted:true};}
   else if(path.startsWith('gallery/')){s.gets++;picture=true;}
   else {status=404;result={error:'FAKE-ONLY unknown route'};}
+  // Simulated server commits and v2 metadata are captured BEFORE holding the
+  // genuine successful response; never stamp late A results with current B.
+  const resource=path==='favorites'?'favorites':path==='gallery'||path.startsWith('gallery/')||path==='generate'?'gallery':null;
+  if(resource){
+   if(method==='POST'&&(resource==='favorites'?beforeFavorites!==JSON.stringify(s.favorites[owner]):beforeImages!==JSON.stringify(s.images[owner])))s.revisions[owner][resource]++;
+   result={...result,owner,context:sessionContext,revision:s.revisions[owner][resource],...(resource==='gallery'&&!picture?{images:[...s.images[owner]]}:{})};
+  }else if(path==='auth/gender')result={...result,owner,context:sessionContext};
+  const imageHeaders=picture?{'x-hairplay-owner':owner,'x-hairplay-context':sessionContext,'x-hairplay-revision':String(s.revisions[owner].gallery)}:{};
   // Hold a captured response after server-side effects, not after logout's 401.
   const key=method+' '+path,h=s.holds[key];if(h){delete s.holds[key];h.started=true;h.event=event;await h.gate;}
-  await route.fulfill({status,contentType:picture?'image/jpeg':'application/json',body:picture?bytes:JSON.stringify(result)}).catch(()=>{});
+  await route.fulfill({status,contentType:picture?'image/jpeg':'application/json',headers:imageHeaders,body:picture?bytes:JSON.stringify(result)}).catch(()=>{});
   if(h)h.done=true;
  });
  const page=await context.newPage();page.setDefaultTimeout(4000);page.on('pageerror',e=>s.errors.push(e.message));page.on('download',()=>s.downloads++);
@@ -124,7 +133,16 @@ for(const kind of ['favorite','generate','import','cache'])await check('epoch va
  if(kind==='favorite'){await choose(p);await btn(p,'★ 已收藏这个模板').click();await p.locator('[aria-label="返回"]').click();await poll(()=>s.events.some(e=>e.path==='favorites'&&e.method==='POST'));}
  if(kind==='generate'){await beginGenerate(p);await poll(()=>s.generates===1);}
  if(kind==='import'){await nav(p,'画廊');await cards(p).click();await btn(p,'同步到云端').click();await p.locator('[aria-label="返回"]').click();await poll(()=>s.imports===1);}
- if(kind==='cache'){await logout(p);s.images[A]=[row];await login(p,A);await poll(()=>s.gets>0);}
+ if(kind==='cache'){
+  // v2 first publishes the gallery revision under its lock. Let that metadata
+  // phase finish, then hold the REAL image response and queue its cache commit
+  // behind a second native lock (preserves the original image-cache window).
+  await q.evaluate(()=>window.releaseLock());await q.evaluate(()=>window.lockDone);
+  await q.route('**/api/gallery/'+id,route=>route.abort());
+  await logout(p);s.images[A]=[row];const image=s.hold('GET gallery/'+id);await login(p,A);await poll(()=>image.started);
+  await q.evaluate(key=>{window.held=false;window.lockDone=navigator.locks.request('hairplay.storage.'+key,async()=>{window.held=true;await new Promise(r=>window.releaseLock=r)})},key);await poll(()=>q.evaluate(()=>window.held));
+  image.release();await poll(()=>image.done);
+ }
  await poll(()=>p.evaluate(async()=>{const q=await navigator.locks.query();return q.pending.length>0}));
  await logout(p);const before=await storage(p),n=await p.evaluate(()=>window.writes.length);await q.evaluate(()=>window.releaseLock());await q.evaluate(()=>window.lockDone);await settle(p);
  // Other tab may sync accountFavorites due to normal storage events; no p write is permitted.

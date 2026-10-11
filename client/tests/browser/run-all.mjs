@@ -14,7 +14,7 @@ import {dirname, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const offline = ['gallery-browser.mjs', 'gallery-lock.mjs', 'gallery-layout.mjs', 'image-cache-browser.mjs', 'account-boundary.mjs', 'account-adversarial.mjs', 'real-account-races.mjs'];
+const offline = ['gallery-browser.mjs', 'gallery-lock.mjs', 'gallery-layout.mjs', 'image-cache-browser.mjs', 'account-boundary.mjs', 'account-adversarial.mjs', 'real-account-races.mjs', 'cross-tab-order.mjs', 'owner-quarantine.mjs', 'sync-revisions-real.mjs', 'preupload-stages-real.mjs'];
 const live = ['live-verify.mjs', 'live-failclosed.mjs', 'live-normal-delete.mjs', 'live-picking-race.mjs', 'public-features-smoke.mjs'];
 
 const args = process.argv.slice(2);
@@ -22,7 +22,7 @@ const named = args.filter(arg => !arg.startsWith('--'));
 const scripts = named.length ? named : args.includes('--live') ? live : offline;
 
 const run = file => new Promise((resolveRun, rejectRun) => {
-  const child = spawn(process.execPath, [resolve(here, file)], {stdio: 'inherit'});
+  const child = spawn(process.execPath, [resolve(here, file)], {stdio: 'inherit', env: {...process.env, CASE:''}});
   child.on('error', rejectRun);
   child.on('close', code => resolveRun(code ?? 1));
 });

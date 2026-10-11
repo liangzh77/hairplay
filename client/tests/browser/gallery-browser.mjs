@@ -34,14 +34,26 @@ const undecodableJpeg = () => 'data:image/jpeg;base64,' + Buffer.concat([
 ]).toString('base64');
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return {promise, resolve}; };
 
-const json = (res, code, body) => { res.writeHead(code, {'Content-Type': 'application/json'}); res.end(JSON.stringify(body)); };
+const revisions=new Map();
+const snapshot=resource=>{
+ const owner=session.email,key=owner+' '+resource,value=resource==='favorites'?JSON.stringify(favorites):JSON.stringify(album.map(i=>i.id));
+ const old=revisions.get(key),revision=old?old.revision+(old.value!==value?1:0):0;revisions.set(key,{value,revision});
+ return {owner,context:session.context,revision,...(resource==='favorites'?{initialized:favorites!==null}:{images:album.map(({bytes,...meta})=>meta)})};
+};
+const json = (res, code, body) => {
+ if(session&&('ids' in body||'images' in body||'deleted' in body||'record' in body||'id' in body))body={...body,...snapshot('ids' in body?'favorites':'gallery')};
+ res.writeHead(code, {'Content-Type': 'application/json'});res.end(JSON.stringify(body));
+};
 const readBody = async req => { let raw = ''; for await (const chunk of req) raw += chunk; try { return JSON.parse(raw) || {}; } catch { return {}; } };
 
 // The account state lives on the "server": the browser only ever sees it through
 // the API, exactly like production.
 const album = [];
 let favorites = null; // null = this account has never stored favourites
-const signedIn = () => ({email: 'qa@example.invalid', gender: 'male', remaining: 3});
+// Direct fixture resets below restore the current mock session, not a login.
+// Only the auth/login endpoint renews its public context.
+let mockContext=newId()+newId().slice(0,8);
+const signedIn = () => ({email: 'qa@example.invalid', context:mockContext,gender: 'male', remaining: 3});
 let session = signedIn();
 let generateCalls = 0, deleteFailures = false, deleteCalls = 0, importCalls = 0, imageFetches = 0;
 // Every favourites write the account receives, in order: `{ids}` is this device
@@ -60,6 +72,7 @@ const server = await startStatic({
 		if (path === '/hairplay/api/auth/code') { json(res, 200, {ok: true}); return true; }
 		if (path === '/hairplay/api/auth/login') {
 			const body = await readBody(req);
+			mockContext=newId()+newId().slice(0,8);
 			session = {...signedIn(), email: String(body.email || 'qa@example.invalid')};
 			json(res, 200, {ok: true});
 			return true;
@@ -75,9 +88,10 @@ const server = await startStatic({
 			return true;
 		}
 		if (path === '/hairplay/api/gallery' && req.method === 'GET') {
-			if (galleryGate) { const gate = galleryGate; galleryGate = null; await gate.promise; }
 			if (!session) { json(res, 401, {error: '登录状态已失效，请重新登录'}); return true; }
-			json(res, 200, {images: album.map(({bytes, ...meta}) => meta)});
+			const captured=snapshot('gallery');
+			if (galleryGate) { const gate = galleryGate; galleryGate = null; await gate.promise; }
+			res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(captured));
 			return true;
 		}
 		if (path === '/hairplay/api/gallery/delete') {
@@ -104,7 +118,7 @@ const server = await startStatic({
 			const found = album.find(i => i.id === id);
 			if (!session || !found) { json(res, 404, {error: '这张图片已不在云端账户中'}); return true; }
 			imageFetches++;
-			res.writeHead(200, {'Content-Type': 'image/jpeg', 'Content-Length': String(found.bytes.length), 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'});
+			res.writeHead(200, {'Content-Type': 'image/jpeg', 'Content-Length': String(found.bytes.length), 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff','X-HairPlay-Owner':session.email,'X-HairPlay-Context':session.context,'X-HairPlay-Revision':String(snapshot('gallery').revision)});
 			res.end(found.bytes);
 			return true;
 		}
@@ -490,7 +504,10 @@ try {
 	album.length = 0;
 	session = signedIn();
 	favorites = null;
-	const stalePage = await context.newPage();
+	// Isolate the refused writer: active peer synchronizers may legitimately heal
+	// this cache, which would defeat this single-page storage-failure premise.
+	const staleContext = await browser.newContext({viewport: {width: 390, height: 844}});
+	const stalePage = await staleContext.newPage();
 	watch(stalePage);
 	await stalePage.goto(url, {waitUntil: 'networkidle'});
 	await stalePage.evaluate(() => localStorage.clear());
@@ -527,7 +544,7 @@ try {
 	const shown = await stalePage.locator('.gallery-card img').first().getAttribute('src');
 	assert.ok(shown?.startsWith('data:image/jpeg;base64,/9j/') && shown !== undecodable, 'the unreadable cached copy must not be rendered');
 	assert.deepEqual((await readGenerations(stalePage)).map(r => r.image), [undecodable], 'the refused write must leave the cache untouched');
-	await stalePage.close();
+	await staleContext.close();
 	summary.push('stale_cache_refetched=OK');
 
 	// 13. A browser without Web Locks refuses every local write, but must still show

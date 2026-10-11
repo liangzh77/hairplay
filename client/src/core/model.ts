@@ -14,7 +14,7 @@ export function filterStyles(category:string,query:string){const q=query.trim().
 // list is authoritative once it exists).
 export interface SavedStyle {id:string;styleId:string;name:string;image:string;created:string}
 export const FAVORITE_LIMIT=50;
-export interface State {version:1;bannerHidden:boolean;rememberOptions:boolean;options:Record<string,string>;favorites:SavedStyle[];favoritesSeparated:boolean;accountFavorites:{owner:string;items:SavedStyle[]}|null}
+export interface State {version:1;bannerHidden:boolean;rememberOptions:boolean;options:Record<string,string>;favorites:SavedStyle[];favoritesSeparated:boolean;accountFavorites:{owner:string;context?:string;revision?:number;items:SavedStyle[]}|null}
 export const initialState=():State=>({version:1,bannerHidden:false,rememberOptions:true,options:{},favorites:[],favoritesSeparated:true,accountFavorites:null});
 function mergeFavorites(preferred:unknown,legacy:unknown):SavedStyle[]{
  const out:SavedStyle[]=[];
@@ -35,7 +35,7 @@ export function decodeState(value:unknown):State{
  if(v.options&&typeof v.options==='object') for(const k of ['风格类型','护理程度','偏好长度','发色偏好'])if(typeof v.options[k]==='string'&&v.options[k].length<30)safe.options[k]=v.options[k];
  safe.favorites=mergeFavorites(v.favorites,v.records);
  safe.favoritesSeparated=v.favoritesSeparated===true;
- if(v.accountFavorites&&typeof v.accountFavorites.owner==='string')safe.accountFavorites={owner:v.accountFavorites.owner,items:mergeFavorites(v.accountFavorites.items,null)};
+ if(v.accountFavorites&&typeof v.accountFavorites.owner==='string')safe.accountFavorites={owner:v.accountFavorites.owner,...(typeof v.accountFavorites.context==='string'?{context:v.accountFavorites.context}:{}),...(Number.isSafeInteger(v.accountFavorites.revision)&&v.accountFavorites.revision>=0?{revision:v.accountFavorites.revision}:{}),items:mergeFavorites(v.accountFavorites.items,null)};
  return safe;}catch{return initialState();}
 }
 // A successful first adoption consumes only the captured ids. A conflict keeps
@@ -70,7 +70,7 @@ export const GENERATION_LIMIT=6;
 // lifetime generation quota.
 export const CLOUD_LIMIT=3;
 export const GENERATION_IMAGE_MAX=2_200_000;
-export interface GeneratedRecord {id:string;name:string;image:string;created:string;source:'ai';cloud?:string}
+export interface GeneratedRecord {id:string;name:string;image:string;created:string;source:'ai';cloud?:string;owner?:string;context?:string;revision?:number}
 const CLOUD_ID=/^[0-9a-f]{24}$/;
 const B64='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 function b64Group(group:string):number[]{const v=[0,1,2,3].map(i=>B64.indexOf(group[i]));return [(v[0]<<2)|(v[1]>>4),((v[1]&15)<<4)|(v[2]>>2),((v[2]&3)<<6)|v[3]];}
@@ -127,7 +127,7 @@ export function sanitizeGeneratedRecord(value:unknown):GeneratedRecord|null{
  if(!value||typeof value!=='object')return null;
  const {cloud,...rest}=value as GeneratedRecord;
  if(!isGeneratedRecord({...rest,cloud:undefined}))return null;
- return validCloudId(cloud)?{...rest,cloud}:rest as GeneratedRecord;}
+ return validCloudId(cloud)?{...value as GeneratedRecord}:rest as GeneratedRecord;}
 export function makeGeneratedRecord(name:string,image:string,cloud?:string):GeneratedRecord{
  const record:GeneratedRecord={id:`gen-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,name:name.slice(0,60)||'AI 发型',image,created:new Date().toISOString(),source:'ai'};
  return validCloudId(cloud)?{...record,cloud}:record;}

@@ -1,6 +1,8 @@
 import {decodeState,decodeGenerations,isGeneratedRecord,isSavedStyle,FAVORITE_LIMIT,GENERATION_LIMIT,type State,type Gender,type GeneratedRecord,type SavedStyle,validatePhoto} from '../core/model';
 export type {Gender} from '../core/model';
 import {assetUrl} from '../core/assets';
+import {accountSync,captureRequest,boundHeaders,acceptResponse,attachReceipt,responseGuard,receiptData,quarantineAccount,StaleResponse} from './account-coordinator';
+export {accountSync,responseGuard,receiptStamp,onQuarantine,observeStorage,rememberGallery,captureGuard,StaleResponse} from './account-coordinator';
 const KEY='hairai.study.v1';
 export function loadState(){try{return decodeState(uni.getStorageSync(KEY));}catch{return decodeState(null);}}
 export function storeState(s:State){try{uni.setStorageSync(KEY,JSON.stringify(s));return '';}catch{return '本地存储空间不足，记录未保存。请删除旧收藏或生成记录后重试。';}}
@@ -27,14 +29,14 @@ export function storeGenerations(list:GeneratedRecord[]){
 const LOCK_TIMEOUT_MS=5000;
 const NO_LOCK_MESSAGE='当前浏览器不支持安全的本地并发写入（缺少 Web Locks）。为避免本机相册的图片被其它标签页误删或复活，本次操作未执行；请使用最新版 Chrome/Edge/Safari 打开，或先点「下载这张」把图片保存到本机。';
 type LockCapableNavigator=Navigator&{locks?:{request:(name:string,options:unknown,fn:()=>Promise<void>)=>Promise<void>}};
-export async function withStorageLock<T>(key:string,fn:()=>T):Promise<T>{
+export async function withStorageLock<T>(key:string,fn:()=>T|Promise<T>):Promise<T>{
  if(typeof window==='undefined'||typeof navigator==='undefined')return fn();
  const locks=(navigator as LockCapableNavigator).locks;
  if(!locks||typeof locks.request!=='function')throw new Error(NO_LOCK_MESSAGE);
  const controller=typeof AbortController==='undefined'?undefined:new AbortController();
  const timer=controller?setTimeout(()=>controller.abort(),LOCK_TIMEOUT_MS):undefined;
  let value!:T,failed=false,failure:unknown,blocked=false;
- try{await locks.request(`hairplay.storage.${key}`,controller?{signal:controller.signal}:undefined,async()=>{try{value=fn();}catch(e){failed=true;failure=e;}});}
+ try{await locks.request(`hairplay.storage.${key}`,controller?{signal:controller.signal}:undefined,async()=>{try{value=await fn();}catch(e){failed=true;failure=e;}});}
  catch{blocked=true;}
  if(timer!==undefined)clearTimeout(timer);
  if(blocked)throw new Error('另一个标签页正在写入本机相册，本次操作未生效，请稍后重试。');
@@ -115,7 +117,7 @@ export async function downloadGenerated(image:string,name:string):Promise<string
  // #endif
  return '此端暂无导出功能';
 }
-export interface Account {email:string;gender:Gender;remaining:number}
+export interface Account {email:string;context:string;gender:Gender;remaining:number}
 // One place decides how a failed API call is reported. The wording must never
 // claim success or blame the user's input for a network/authentication problem:
 // every caller turns these strings into an on-screen failure notice.
@@ -124,10 +126,17 @@ function apiBase(){return import.meta.env.BASE_URL+'api/';}
 // be able to read that body instead of seeing a generic failure message.
 async function apiRequest(path:string,init:RequestInit={},accept:number[]=[200]):Promise<any>{
  // #ifdef H5
- let response:Response;try{response=await fetch(apiBase()+path,{credentials:'same-origin',cache:'no-store',...init});}
+ const resource=path==='favorites'?'favorites':path==='gallery'||path.startsWith('gallery/')?'gallery':null;
+ const bound=resource!==null||path==='auth/gender'||(path==='auth/logout'&&!init.headers);
+ const ticket=bound?captureRequest(resource??undefined):null;
+ let response:Response;try{response=await fetch(apiBase()+path,{credentials:'same-origin',cache:'no-store',...init,headers:{...init.headers,...(ticket?boundHeaders(ticket):{})}});}
  catch{throw Error('无法连接有型服务，请检查网络后重试');}
  const data=await response.json().catch(()=>({error:'服务返回异常'}));
+ if(ticket&&!accountSync.valid(ticket))throw new StaleResponse();
+ if(data.code==='CONTEXT_MISMATCH'||data.code==='SESSION_REQUIRED'){quarantineAccount();throw new StaleResponse();}
  if(!response.ok&&!accept.includes(response.status))throw Error(typeof data.error==='string'&&data.error?data.error:response.status===401?'登录状态已失效，请重新登录':'服务暂不可用，请稍后重试');
+ if(ticket&&resource)return acceptResponse(ticket,resource,data,path==='favorites'&&init.method==='POST'&&typeof init.body==='string'&&Array.isArray(JSON.parse(init.body).ids)&&data.ok===true);
+ if(ticket&&path==='auth/gender'&&(data.owner!==ticket.owner||data.context!==ticket.context))throw new StaleResponse();
  return data;
  // #endif
  // #ifdef MP-WEIXIN
@@ -135,56 +144,64 @@ async function apiRequest(path:string,init:RequestInit={},accept:number[]=[200])
  // #endif
 }
 const jsonPost=(body:unknown):RequestInit=>({method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
-export async function accountApi(path:string,body?:Record<string,string|null>):Promise<{account?:Account|null}>{
+export async function accountApi(path:string,body?:Record<string,string|null>,context?:string):Promise<{account?:Account|null}>{
  // #ifdef MP-WEIXIN
  throw Error('小程序邮箱登录与真实生成尚未接入');
  // #endif
- return apiRequest(path,body?jsonPost(body):{});
+ const init:RequestInit=body?jsonPost(body):{};
+ if(context)init.headers={'content-type':'application/json','x-hairplay-context':String(context)};
+ return apiRequest(path,init);
 }
 export interface CloudImage {id:string;name:string;style:string|null;created:string;size:number}
+export function cloudSnapshotImages(value:object):CloudImage[]{const data=receiptData(value) as {images?:CloudImage[]};if(!Array.isArray(data.images))throw Error('云端相册合同无效');return attachReceipt(data.images,value);}
 // The cloud album is the authoritative list for a signed-in account: the local
 // records are only a cache, so every sync and every deletion asks the server.
 export async function cloudAlbum():Promise<CloudImage[]>{
  const data=await apiRequest('gallery');
  if(!Array.isArray(data?.images))throw Error('云端相册返回异常，请稍后重试');
- return data.images.filter((r:any)=>r&&typeof r.id==='string'&&/^[0-9a-f]{24}$/.test(r.id)).map((r:any)=>({id:r.id,name:typeof r.name==='string'?r.name:'AI 发型',style:typeof r.style==='string'?r.style:null,created:typeof r.created==='string'?r.created:new Date().toISOString(),size:Number(r.size)||0}));
+ return attachReceipt(data.images.filter((r:any)=>r&&typeof r.id==='string'&&/^[0-9a-f]{24}$/.test(r.id)).map((r:any)=>({id:r.id,name:typeof r.name==='string'?r.name:'AI 发型',style:typeof r.style==='string'?r.style:null,created:typeof r.created==='string'?r.created:new Date().toISOString(),size:Number(r.size)||0})),data);
 }
 export async function cloudImageData(id:string):Promise<string>{
  // #ifdef H5
- let response:Response;try{response=await fetch(apiBase()+'gallery/'+id,{credentials:'same-origin',cache:'no-store'});}catch{throw Error('无法连接有型服务，请检查网络后重试');}
+ const ticket=captureRequest('gallery');
+ let response:Response;try{response=await fetch(apiBase()+'gallery/'+id,{credentials:'same-origin',cache:'no-store',headers:boundHeaders(ticket)});}catch{throw Error('无法连接有型服务，请检查网络后重试');}
  if(!response.ok)throw Error(response.status===404?'这张图片已不在云端账户中':'云端图片读取失败，请稍后重试');
+ const receipt=acceptResponse(ticket,'gallery',{owner:response.headers.get('x-hairplay-owner'),context:response.headers.get('x-hairplay-context'),revision:Number(response.headers.get('x-hairplay-revision'))});
+ const current=responseGuard(receipt);
  const blob=await response.blob();
+ if(!current())throw new StaleResponse();
  if(blob.size<1_024||blob.size>4*1024*1024||blob.type&&!blob.type.startsWith('image/jpeg'))throw Error('云端图片格式无效');
- return await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(Error('云端图片读取失败'));reader.readAsDataURL(blob);});
+ const out=await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(Error('云端图片读取失败'));reader.readAsDataURL(blob);});
+ if(!current())throw new StaleResponse();return out;
  // #endif
  throw Error('小程序端账户服务尚未接入');
 }
-export async function cloudDelete(id:string):Promise<boolean>{
+export async function cloudDelete(id:string):Promise<{deleted:boolean}>{
  const data=await apiRequest('gallery/delete',jsonPost({id}));
- return data?.deleted===true;
+ return attachReceipt({deleted:data?.deleted===true},data);
 }
 export async function cloudImport(image:string,name:string,styleId?:string):Promise<{id:string;created:string}>{
  const data=await apiRequest('gallery/import',jsonPost({image,name,style:styleId}));
  if(typeof data?.id!=='string'||!/^[0-9a-f]{24}$/.test(data.id))throw Error('云端相册返回异常，请稍后重试');
- return {id:data.id,created:typeof data.created==='string'?data.created:new Date().toISOString()};
+ return attachReceipt({id:data.id,created:typeof data.created==='string'?data.created:new Date().toISOString()},data);
 }
 export async function cloudFavorites():Promise<{ids:string[];initialized:boolean}>{
  const data=await apiRequest('favorites');
- return {ids:styleIds(data?.ids),initialized:data?.initialized===true};
+ return attachReceipt({ids:styleIds(data?.ids),initialized:data?.initialized===true},data);
 }
 function styleIds(value:unknown):string[]{return Array.isArray(value)?value.filter((id:unknown):id is string=>typeof id==='string'):[];}
 // Adopting this device's list is only allowed once. A 409 means another device
 // already stored a list, so the answer to adopt is that list, not ours.
 export async function cloudSaveFavorites(ids:string[]):Promise<{ids:string[];conflict:boolean}>{
  const data=await apiRequest('favorites',jsonPost({ids}),[200,409]);
- return {ids:styleIds(data?.ids),conflict:data?.ok!==true};
+ return attachReceipt({ids:styleIds(data?.ids),conflict:data?.ok!==true},data);
 }
 // One atomic edit on the server's current list: another device's concurrent
 // removal can no longer be undone by this device's stale snapshot.
 export async function cloudEditFavorite(action:'add'|'remove',styleId:string):Promise<string[]>{
  const data=await apiRequest('favorites',jsonPost({[action]:styleId}));
  if(!Array.isArray(data?.ids))throw Error('收藏同步返回异常，请稍后重试');
- return styleIds(data.ids);
+ return attachReceipt(styleIds(data.ids),data);
 }
 export function setupImageCache():()=>void{
  // #ifdef H5
@@ -233,6 +250,7 @@ export async function generateLiveImage(photo:Photo,styleId:string,requirements:
  // The file picker MIME may be wrong (e.g. HEIC/PNG bytes named .jpg). The image
  // has already been decoded for preview; re-encode those pixels as real JPEG.
  // This also strips EXIF/GPS metadata and bounds the upload dimensions.
+ const ticket=captureRequest('gallery');
  const img=new Image();img.src=photo.url;
  try{await img.decode();}catch{throw new Error('浏览器无法解码这张照片，请换一张 JPG、PNG 或 WebP');}
  if(!current())throw new Error('账户已变更，照片未发送');
@@ -247,7 +265,7 @@ export async function generateLiveImage(photo:Photo,styleId:string,requirements:
  const dataUrl=await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(new Error('无法读取照片'));reader.readAsDataURL(jpeg);});
  if(!current())throw new Error('账户已变更，照片未发送');
  let response:Response;
- try{response=await fetch(import.meta.env.BASE_URL+'api/generate',{method:'POST',headers:{'content-type':'application/json',...(owner?{'x-hairplay-account':owner}:{})},body:JSON.stringify({photo:dataUrl,styleId,requirements})});}
+ try{response=await fetch(import.meta.env.BASE_URL+'api/generate',{method:'POST',headers:{'content-type':'application/json',...boundHeaders(ticket),...(owner?{'x-hairplay-account':owner}:{})},body:JSON.stringify({photo:dataUrl,styleId,requirements})});}
  catch{throw new Error('本机 AI 服务未启动；照片没有发送到火山云');}
  if(response.status===404)throw new Error('AI 服务未配置：请先启动本机服务；照片没有发送到火山云');
  const result=await response.json().catch(()=>({error:'服务返回异常'}));
@@ -256,7 +274,8 @@ export async function generateLiveImage(photo:Photo,styleId:string,requirements:
  // The account id is what makes the picture visible on another device. A server
  // that stored the picture but returned no id leaves the caller to re-read the
  // account list instead of inventing a link it cannot verify.
- return {image:result.image,cloud:typeof result.record?.id==='string'&&/^[0-9a-f]{24}$/.test(result.record.id)?result.record.id:''};
+ acceptResponse(ticket,'gallery',result);
+ return attachReceipt({image:result.image,cloud:typeof result.record?.id==='string'&&/^[0-9a-f]{24}$/.test(result.record.id)?result.record.id:''},result);
  // #endif
  // #ifdef MP-WEIXIN
  throw new Error('小程序端真实 AI 服务尚未接入；照片没有上传');
@@ -333,10 +352,13 @@ export async function downloadStyle(url:string,name:string):Promise<string>{
 // copy. Same-origin with the session cookie, so the anchor download works.
 export async function downloadCloudImage(id:string,name:string,current:()=>boolean=()=>true):Promise<string>{
  // #ifdef H5
- let response:Response;try{response=await fetch(apiBase()+'gallery/'+id,{credentials:'same-origin',cache:'no-store'});}catch{throw Error('无法连接有型服务，请检查网络后重试');}
+ const ticket=captureRequest('gallery');if(!current())throw new StaleResponse();
+ let response:Response;try{response=await fetch(apiBase()+'gallery/'+id,{credentials:'same-origin',cache:'no-store',headers:boundHeaders(ticket)});}catch{throw Error('无法连接有型服务，请检查网络后重试');}
  if(!response.ok)throw Error(response.status===404?'这张图片已不在云端账户中':'云端原图下载失败，请稍后重试');
+ const receipt=acceptResponse(ticket,'gallery',{owner:response.headers.get('x-hairplay-owner'),context:response.headers.get('x-hairplay-context'),revision:Number(response.headers.get('x-hairplay-revision'))});
+ const accepted=responseGuard(receipt);
  const blob=await response.blob();
- if(!current())throw Error('账户已变更，已取消旧账户图片下载');
+ if(!current()||!accepted())throw new StaleResponse();
  if(blob.size<1_024||blob.size>4*1024*1024)throw Error('云端原图大小异常，已取消下载');
  const objectUrl=URL.createObjectURL(blob);
  const a=document.createElement('a');a.href=objectUrl;a.download=`HairPlay-AI-${name||'style'}.jpg`;document.body.appendChild(a);a.click();a.remove();

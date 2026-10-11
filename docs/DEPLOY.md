@@ -42,7 +42,7 @@ scripts/deploy-api.sh <版本号> [switch]   # 版本号形如 20261011T012345Z�
 
 信号回归另运行 `python3 scripts/test_api_remote_signals.py`（Linux，仅临时目录，须与主发布演练一样的依赖/权限）：用完整 publisher 验 PID TERM 与进程组 TERM/HUP/INT 四例，均须拒绝、回滚、保留失败树且清理健康临时文件。发布脚本显式 signal→rollback，不依赖被中断子进程的 ERR；测试子进程重置默认信号，避免 nohup 的 inherited ignore 令 HUP/INT 探针无效。53 项主演练与这 4 例分别计数。
 
-`/hairplay/api/*` 之外没有 `/health` 路由（直接访问 404），线上健康检查只认 `/hairplay/api/session`。发布顺序固定为**先 API、后静态**：旧前端会忽略新增的响应字段，而新前端依赖新的 `POST /api/gallery/*`，先发 API 才不会出现 404 窗口。
+`/hairplay/api/*` 之外没有 `/health` 路由（直接访问 404），线上健康检查只认 `/hairplay/api/session`。发布顺序固定为**先 API、后静态**。本地实施中的 v2 会话 context/revision 合同见 [SYNC_CONTRACT.md](SYNC_CONTRACT.md)：旧前端可忽略新增字段并继续兼容的读/原子编辑，但无 context 的 generate/import/logout 将要求刷新新 UI（428），不承诺旧无头操作具有新身份保证。新 UI 依赖 v2 metadata，API 回退需同时协调 UI 回退。本轮尚未批准发布。
 
 ## 服务器位置与路由
 

@@ -25,9 +25,14 @@ function app(t,{fetchImpl=upstream}={}){
  t.after(()=>server.close());
  return {store,server};
 }
-const cookieFor=(store,email,ip)=>'hairplay='+login(store,email,ip);
+const contexts=new Map();
+const cookieFor=(store,email,ip)=>{const token=login(store,email,ip),cookie='hairplay='+token;contexts.set(cookie,store.session(token).context);return cookie;};
+// Legacy field assertions remain here; full v2 metadata is asserted separately in
+// sync-contract.test.mjs. Do not omit fields other than documented additions.
+const legacy=value=>{const {owner,context,revision,initialized,...rest}=value;if('ids' in rest)return rest;if('id' in rest||'deleted' in rest){const {images,...record}=rest;return record;}return rest;};
+const legacyFavorites=value=>{const {owner,context,revision,...rest}=value;return rest;};
 const userOf=(store,cookie)=>store.session(cookie.slice('hairplay='.length));
-const post=(base,path,body,cookie,headers={})=>fetch(base+path,{method:'POST',headers:{origin,'content-type':'application/json',...(cookie?{cookie}:{}),...headers},body:JSON.stringify(body)});
+const post=(base,path,body,cookie,headers={})=>fetch(base+path,{method:'POST',headers:{origin,'content-type':'application/json',...(cookie?{cookie,'x-hairplay-context':contexts.get(cookie)}:{}),...headers},body:JSON.stringify(body)});
 
 test('generation binds the new client confirmation to the shared-cookie account',async t=>{
  let calls=0;const {store,server}=app(t,{fetchImpl:async()=>{calls++;return upstream();}}),base=await start(server);
@@ -64,7 +69,7 @@ test('store keeps cloud pictures per account, caps the album and dedupes identic
  assert.ok(Buffer.from(store.image(a.id,one.id).bytes).equals(pics[0]));
  // The same bytes are the same picture: a retry returns the existing row instead
  // of spending a second slot, and it keeps the name it was first stored with.
- assert.deepEqual(store.addImage(a.id,{name:'重试',style:'dracula'},pics[0]),{...one});
+ assert.deepEqual(legacy(store.addImage(a.id,{name:'重试',style:'dracula'},pics[0])),legacy(one));
  assert.equal(store.countImages(a.id),2);
  assert.equal(store.image(a.id,one.id).name,'第一张');
  assert.equal(store.image(a.id,one.id).style,'catalog-53-1');
@@ -75,7 +80,7 @@ test('store keeps cloud pictures per account, caps the album and dedupes identic
  assert.equal(store.countImages(a.id),GALLERY_LIMIT);
  // Dedupe is answered before the cap: re-importing a picture the account already
  // holds succeeds even when the album is full.
- assert.deepEqual(store.addImage(a.id,{name:'满时重试'},pics[0]),{...one});
+ assert.deepEqual(legacy(store.addImage(a.id,{name:'满时重试'},pics[0])),legacy(one));
  assert.equal(store.countImages(a.id),GALLERY_LIMIT);
  assert.equal(store.deleteImage(b.id,one.id),false);
  assert.equal(store.deleteImage(a.id,one.id),true);
@@ -114,25 +119,25 @@ test('store favourites: adoption once, atomic edits, unvalidated rows are filter
  const {store}=fixture(t);
  const user=userOf(store,cookieFor(store,'favstore@example.invalid','favstore'));
  assert.equal(store.favorites(user.id),null);
- assert.deepEqual(store.adoptFavorites(user.id,['catalog-53-1','dracula','catalog-53-1']),{ids:['catalog-53-1','dracula'],conflict:false});
+ assert.deepEqual(legacy(store.adoptFavorites(user.id,['catalog-53-1','dracula','catalog-53-1'])),{ids:['catalog-53-1','dracula'],conflict:false});
  // Only the first snapshot is accepted; afterwards the server list is the truth,
  // so a stale snapshot cannot resurrect what another device removed.
- assert.deepEqual(store.adoptFavorites(user.id,['catalog-53-1']),{ids:['catalog-53-1','dracula'],conflict:true});
- assert.deepEqual(store.addFavorite(user.id,'catalog-44-0'),{ids:['catalog-44-0','catalog-53-1','dracula']});
- assert.deepEqual(store.addFavorite(user.id,'catalog-44-0'),{ids:['catalog-44-0','catalog-53-1','dracula']});
- assert.deepEqual(store.removeFavorite(user.id,'dracula'),{ids:['catalog-44-0','catalog-53-1']});
+ assert.deepEqual(legacy(store.adoptFavorites(user.id,['catalog-53-1'])),{ids:['catalog-53-1','dracula'],conflict:true});
+ assert.deepEqual(legacy(store.addFavorite(user.id,'catalog-44-0')),{ids:['catalog-44-0','catalog-53-1','dracula']});
+ assert.deepEqual(legacy(store.addFavorite(user.id,'catalog-44-0')),{ids:['catalog-44-0','catalog-53-1','dracula']});
+ assert.deepEqual(legacy(store.removeFavorite(user.id,'dracula')),{ids:['catalog-44-0','catalog-53-1']});
  assert.deepEqual(store.favorites(user.id),['catalog-44-0','catalog-53-1']);
  // A deliberately empty list is distinguishable from "never synced".
  store.setFavorites(user.id,[]);
  assert.deepEqual(store.favorites(user.id),[]);
- assert.deepEqual(store.adoptFavorites(user.id,['dracula']),{ids:[],conflict:true});
+ assert.deepEqual(legacy(store.adoptFavorites(user.id,['dracula'])),{ids:[],conflict:true});
  store.db.prepare('UPDATE favorites SET ids=? WHERE user=?').run(JSON.stringify(['ok-id','../escape','带空格 id']),user.id);
  assert.deepEqual(store.favorites(user.id),['ok-id']);
  const full=Array.from({length:FAVORITE_LIMIT},(_,i)=>'f'+i);
  store.setFavorites(user.id,full);
  assert.throws(()=>store.addFavorite(user.id,'one-more'),{status:429});
  assert.deepEqual(store.favorites(user.id),full);
- assert.deepEqual(store.removeFavorite(user.id,'f0'),{ids:full.slice(1)});
+ assert.deepEqual(legacy(store.removeFavorite(user.id,'f0')),{ids:full.slice(1)});
 });
 
 test('cloud album HTTP: ownership, byte-exact download, idempotent delete and uncacheable images',async t=>{
@@ -145,7 +150,7 @@ test('cloud album HTTP: ownership, byte-exact download, idempotent delete and un
  assert.match(body.record.id,/^[0-9a-f]{24}$/);
  assert.ok(!JSON.stringify(body).includes(config.key));
  assert.equal(store.image(userOf(store,a).id,body.record.id).name,'庞巴杜发型');
- assert.deepEqual(await (await fetch(base+'/api/gallery',{headers:{cookie:a}})).json(),{images:[{id:body.record.id,name:'庞巴杜发型',style:'catalog-53-1',created:body.record.created,size:picture.length}]});
+ assert.deepEqual(legacy(await (await fetch(base+'/api/gallery',{headers:{cookie:a}})).json()),{images:[{id:body.record.id,name:'庞巴杜发型',style:'catalog-53-1',created:body.record.created,size:picture.length}]});
  assert.equal((await fetch(base+'/api/gallery')).status,401);
  assert.equal((await fetch(base+'/api/gallery/'+body.record.id)).status,401);
  assert.equal((await fetch(base+'/api/gallery/'+body.record.id,{headers:{cookie:b}})).status,404);
@@ -162,12 +167,12 @@ test('cloud album HTTP: ownership, byte-exact download, idempotent delete and un
  assert.ok(Buffer.from(await image.arrayBuffer()).equals(picture));
  assert.equal((await post(base,'/api/gallery/delete',{id:'nope'},a)).status,400);
  assert.equal((await post(base,'/api/gallery/delete',{id:'A'.repeat(24)},a)).status,400);
- assert.deepEqual(await (await post(base,'/api/gallery/delete',{id:body.record.id},b)).json(),{ok:true,deleted:false});
+ assert.deepEqual(legacy(await (await post(base,'/api/gallery/delete',{id:body.record.id},b)).json()),{ok:true,deleted:false});
  assert.equal(store.countImages(userOf(store,a).id),1);
- assert.deepEqual(await (await post(base,'/api/gallery/delete',{id:body.record.id},a)).json(),{ok:true,deleted:true});
- assert.deepEqual(await (await post(base,'/api/gallery/delete',{id:body.record.id},a)).json(),{ok:true,deleted:false});
+ assert.deepEqual(legacy(await (await post(base,'/api/gallery/delete',{id:body.record.id},a)).json()),{ok:true,deleted:true});
+ assert.deepEqual(legacy(await (await post(base,'/api/gallery/delete',{id:body.record.id},a)).json()),{ok:true,deleted:false});
  assert.equal((await fetch(base+'/api/gallery/'+body.record.id,{headers:{cookie:a}})).status,404);
- assert.deepEqual(await (await fetch(base+'/api/gallery',{headers:{cookie:a}})).json(),{images:[]});
+ assert.deepEqual(legacy(await (await fetch(base+'/api/gallery',{headers:{cookie:a}})).json()),{images:[]});
  assert.equal((await post(base,'/api/gallery/delete',{id:body.record.id},'')).status,401);
  assert.equal((await post(base,'/api/gallery/delete',{id:body.record.id},a,{origin:'https://evil.invalid'})).status,403);
  assert.equal((await post(base,'/api/gallery/delete',{id:body.record.id},a,{'content-type':'text/plain'})).status,403);
@@ -272,30 +277,30 @@ test('import accepts only structurally complete JPEGs, dedupes retries and stops
 test('favourites HTTP: adoption happens once, then edits are atomic add/remove',async t=>{
  const {store,server}=app(t);const base=await start(server);
  const cookie=cookieFor(store,'fav@example.invalid','fav');
- assert.deepEqual(await (await fetch(base+'/api/favorites',{headers:{cookie}})).json(),{ids:[],initialized:false});
+ assert.deepEqual(await (await fetch(base+'/api/favorites',{headers:{cookie}})).json().then(legacyFavorites),{ids:[],initialized:false});
  assert.equal((await fetch(base+'/api/favorites')).status,401);
  assert.equal((await post(base,'/api/favorites',{ids:['catalog-53-1']},'')).status,401);
  for(const body of [{ids:'catalog-53-1'},{ids:['../etc/passwd']},{ids:['x'.repeat(41)]},{ids:['带空格 id']},{ids:Array.from({length:51},(_,i)=>'a'+i)},
                     {add:'dracula',remove:'catalog-53-1'},{},{add:''},{remove:7},[]])
   assert.equal((await post(base,'/api/favorites',body,cookie)).status,400);
  // Adoption: this device's list is stored once, duplicates dropped.
- assert.deepEqual(await (await post(base,'/api/favorites',{ids:['catalog-53-1','catalog-53-1','dracula']},cookie)).json(),{ok:true,ids:['catalog-53-1','dracula'],initialized:true});
- assert.deepEqual(await (await fetch(base+'/api/favorites',{headers:{cookie}})).json(),{ids:['catalog-53-1','dracula'],initialized:true});
+ assert.deepEqual(await (await post(base,'/api/favorites',{ids:['catalog-53-1','catalog-53-1','dracula']},cookie)).json().then(legacyFavorites),{ok:true,ids:['catalog-53-1','dracula'],initialized:true});
+ assert.deepEqual(await (await fetch(base+'/api/favorites',{headers:{cookie}})).json().then(legacyFavorites),{ids:['catalog-53-1','dracula'],initialized:true});
  // A second snapshot is refused with the authoritative list instead of
  // overwriting it: a device holding a stale snapshot must not resurrect a
  // favourite another device already removed.
  const conflict=await post(base,'/api/favorites',{ids:['dracula']},cookie);
  assert.equal(conflict.status,409);
- assert.deepEqual(await conflict.json(),{ok:false,ids:['catalog-53-1','dracula'],initialized:true});
- assert.deepEqual(await (await fetch(base+'/api/favorites',{headers:{cookie}})).json(),{ids:['catalog-53-1','dracula'],initialized:true});
- assert.deepEqual(await (await post(base,'/api/favorites',{add:'dracula'},cookie)).json(),{ok:true,ids:['catalog-53-1','dracula'],initialized:true});
- assert.deepEqual(await (await post(base,'/api/favorites',{remove:'catalog-53-1'},cookie)).json(),{ok:true,ids:['dracula'],initialized:true});
- assert.deepEqual(await (await fetch(base+'/api/favorites',{headers:{cookie}})).json(),{ids:['dracula'],initialized:true});
+ assert.deepEqual(await conflict.json().then(legacyFavorites),{ok:false,ids:['catalog-53-1','dracula'],initialized:true});
+ assert.deepEqual(await (await fetch(base+'/api/favorites',{headers:{cookie}})).json().then(legacyFavorites),{ids:['catalog-53-1','dracula'],initialized:true});
+ assert.deepEqual(await (await post(base,'/api/favorites',{add:'dracula'},cookie)).json().then(legacyFavorites),{ok:true,ids:['catalog-53-1','dracula'],initialized:true});
+ assert.deepEqual(await (await post(base,'/api/favorites',{remove:'catalog-53-1'},cookie)).json().then(legacyFavorites),{ok:true,ids:['dracula'],initialized:true});
+ assert.deepEqual(await (await fetch(base+'/api/favorites',{headers:{cookie}})).json().then(legacyFavorites),{ids:['dracula'],initialized:true});
  // Removing what is not there still records the edit, so the other devices learn
  // about it instead of the account reading as "never synced".
- assert.deepEqual(await (await post(base,'/api/favorites',{remove:'gone'},cookie)).json(),{ok:true,ids:['dracula'],initialized:true});
+ assert.deepEqual(await (await post(base,'/api/favorites',{remove:'gone'},cookie)).json().then(legacyFavorites),{ok:true,ids:['dracula'],initialized:true});
  const other=cookieFor(store,'other@example.invalid','other');
- assert.deepEqual(await (await fetch(base+'/api/favorites',{headers:{cookie:other}})).json(),{ids:[],initialized:false});
- assert.deepEqual(await (await post(base,'/api/favorites',{add:'dracula'},other)).json(),{ok:true,ids:['dracula'],initialized:true});
- assert.deepEqual(await (await fetch(base+'/api/favorites',{headers:{cookie}})).json(),{ids:['dracula'],initialized:true});
+ assert.deepEqual(await (await fetch(base+'/api/favorites',{headers:{cookie:other}})).json().then(legacyFavorites),{ids:[],initialized:false});
+ assert.deepEqual(await (await post(base,'/api/favorites',{add:'dracula'},other)).json().then(legacyFavorites),{ok:true,ids:['dracula'],initialized:true});
+ assert.deepEqual(await (await fetch(base+'/api/favorites',{headers:{cookie}})).json().then(legacyFavorites),{ids:['dracula'],initialized:true});
 });
