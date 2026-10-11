@@ -48,6 +48,13 @@ SC-R1 数据库回退边界：`sessions` 保持三列，context 在附属表；�
 
 新增业务护栏：`node --test server/rollback-compat.test.mjs` 在干净 checkout 内覆盖三列旧库及四列中间库、六进程迁移/context、真实位置 INSERT、退出/过期清理、旧资源 ABA/删除及再升级；`python3 scripts/test_api_rollback_migration.py` 在 Linux `/tmp` 使用完整未修改 publisher，强制新健康失败，验证真实旧 AuthStore 正确码登录/退出/再登录、账户/图库写入和再升级，备份与当前新写入都保留（6 成员 API fixture，不冒充产品 34 成员包）。`scripts/fixtures/rollback-auth-2f9a748.mjs` 是 `2f9a748:server/auth.mjs` 的逐字节测试副本，不进 API 允许清单；可用 `HAIRPLAY_TEST_OLD_AUTH` 指向隔离 git 导出模块做额外实验，不指向生产目录。健康 200/users 不变不能替代这一业务护栏。
 
+## 2026-10-12 生成结果跳转修复（仅 H5）
+
+- 产品提交 `64c005c`，H5 release **`20261011T162928Z`**（UTC 编号；北京时间 10 月 12 日）。生成弹窗按钮改为「查看画廊」，先关闭弹窗并退出原发型详情，再切到画廊，避免详情优先渲染遮住「我的生成」。不改账户同步逻辑。
+- 已提交源码的干净 archive 构建及完整 gallery 浏览器回归通过；旧版相同选发型路径确定性无法显示生成卡，新版通过。此前 typecheck、29 个客户端测试通过。远端 47 个静态文件全部 HTTP SHA-256 一致，53 项元数据路径返回 404。
+- 正式 URL 的实际静态资源经 Chrome 360/390 宽度复测“目录选造型→生成→查看画廊”，生成卡可见、旧详情及弹窗关闭、导航选中画廊，无 pageerror。此项所有 API 均由浏览器拦截模拟，没有实际发信/生成/写生产数据，不冒充真实 Ark 验证。
+- API 仍为 `20261011T153158Z`，服务启动时间和 NRestarts 未变；数据库未操作，主站隐私、Vias、Caddy 均未修改。旧静态 `20261011T153158Z` 保留，回退清单 `/tmp/hairplay-deploy-20261011T153158Z/manifest.json`。证据 `/tmp/hairplay-gallery-release-20261011T162928Z/`。
+
 ## 2026-10-11 同步 v2 发布记录
 
 - 固定产品源码 `6ff9294d4e9df19db159bbb959aab3b122f187bf`；Sol medium 实施、Astra high 最终独立 **APPROVE**，干净 archive 完整浏览器回归首次 14/14。用户随后明确授权提交、推送、部署。
