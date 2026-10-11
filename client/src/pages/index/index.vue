@@ -93,7 +93,7 @@ function syncLocalStores(event?:StorageEvent){
  if(fav==='newer'||event?.key==='hairai.study.v1'&&prefs(event.oldValue)!==prefs(event.newValue))void syncFavoritesWithAccount();
  if(gallery==='newer'){cloudImages.value=null;generatedDetail.value=null;liveImage.value='';void syncCloudAlbum();}
 }
-watch(album,rows=>{if(generatedDetail.value)generatedDetail.value=rows.find(r=>r.id===generatedDetail.value?.id||!!r.cloud&&r.cloud===generatedDetail.value?.cloud)||null;});
+watch(album,rows=>{const selected=generatedDetail.value;if(!selected)return;const cloud=selected.cloud||importedPointers.value[selected.id];generatedDetail.value=rows.find(r=>r.id===selected.id||!!cloud&&r.cloud===cloud)||null;});
 watch([tab,account],()=>{void nextTick().then(()=>{if(typeof document==='undefined')return;
  document.querySelector('#auth-email input')?.setAttribute('autocomplete','email');
  document.querySelector('#auth-code input')?.setAttribute('autocomplete','one-time-code');
