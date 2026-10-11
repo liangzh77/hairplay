@@ -51,12 +51,14 @@ atomic_switch() {
 # The health contract is the complete response — HTTP 200 and exactly this body —
 # so a line match cannot accept a page that also carries something else.
 api_health() {
-  local i body status
+  local i status response
+  [[ -z ${health_file:-} ]] || rm -f -- "$health_file"
+  response=$(mktemp) || return 1
+  health_file=$response
   for i in $(seq 1 20); do
-    if body=$(curl --noproxy '*' -sS --max-time 5 -w '\n%{http_code}' "$health" 2>/dev/null); then
-      status=${body##*$'\n'}
-      body=${body%$'\n'*}
-      if [[ "$status" == 200 && "$body" == '{"account":null}' ]]; then
+    if status=$(curl --noproxy '*' -sS --max-time 5 -o "$response" -w '%{http_code}' "$health" 2>/dev/null); then
+      if [[ "$status" == 200 ]] && printf '%s' '{"account":null}' | cmp -s - "$response"; then
+        rm -f -- "$response"
         [[ $(sqlite3 "$data/auth.sqlite" 'SELECT count(*) FROM users;') == "$users_before" ]] || {
           echo 'Account count changed during publish' >&2; return 1; }
         return 0
@@ -64,10 +66,12 @@ api_health() {
     fi
     sleep 1
   done
+  rm -f -- "$response"
   echo 'API health check failed' >&2
   return 1
 }
 cleanup() {
+  [[ -z ${health_file:-} ]] || rm -f -- "$health_file"
   [[ -z "$staging" ]] || rm -rf -- "$staging"
   [[ -z "$link_dir" ]] || rm -rf -- "$link_dir"
   return 0

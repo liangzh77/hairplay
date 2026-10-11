@@ -8,7 +8,7 @@ const load=file=>readFile(new URL('../client/src/static/catalog/'+file,import.me
 const picture=await load('ai-catalog-53-0.jpg');
 // Distinct real JPEGs: the album keys on the content hash, so every "another
 // picture" case needs different bytes that still decode.
-const others=await Promise.all(['ai-catalog-44-0.jpg','catalog-44-0.jpg','ai-dracula.jpg'].map(load));
+const others=await Promise.all(['ai-catalog-44-0.jpg','ai-catalog-44-1.jpg','ai-dracula.jpg'].map(load));
 const pics=[picture,...others];
 const dataOf=bytes=>'data:image/jpeg;base64,'+bytes.toString('base64');
 const data=dataOf(picture);
@@ -28,6 +28,15 @@ function app(t,{fetchImpl=upstream}={}){
 const cookieFor=(store,email,ip)=>'hairplay='+login(store,email,ip);
 const userOf=(store,cookie)=>store.session(cookie.slice('hairplay='.length));
 const post=(base,path,body,cookie,headers={})=>fetch(base+path,{method:'POST',headers:{origin,'content-type':'application/json',...(cookie?{cookie}:{}),...headers},body:JSON.stringify(body)});
+
+test('favorites HTTP accepts exactly one valid operation, never mixed or extra keys',async t=>{
+ const {store,server}=app(t),base=await start(server),cookie=cookieFor(store,'contract@example.invalid','contract');
+ for(const body of [null,[],{}, {ids:[],add:'dracula'}, {ids:[],add:'dracula',remove:'catalog-53-1'}, {add:'dracula',unexpected:true}, {ids:'bad',remove:'dracula'}, {ids:'bad'}, {add:[]}, {remove:42}, {unexpected:true}])assert.equal((await post(base,'/api/favorites',body,cookie)).status,400,JSON.stringify(body));
+ assert.equal((await post(base,'/api/favorites',{ids:['dracula','dracula']},cookie)).status,200);
+ const conflict=await post(base,'/api/favorites',{ids:[]},cookie);assert.equal(conflict.status,409);assert.deepEqual((await conflict.json()).ids,['dracula']);
+ assert.equal((await post(base,'/api/favorites',{remove:'dracula'},cookie)).status,200);
+ assert.equal((await post(base,'/api/favorites',{add:'catalog-53-1'},cookie)).status,200);
+});
 
 test('store keeps cloud pictures per account, caps the album and dedupes identical bytes',t=>{
  const {store}=fixture(t);

@@ -232,7 +232,7 @@ try {
 	const favoriteName = await page.locator('.style-name').innerText();
 	await page.locator('uni-button').filter({hasText: '☆ 收藏这个模板'}).click();
 	await page.locator('.notice').filter({hasText: '已收藏'}).waitFor();
-	const favoriteId = (await readFavorites(page)).at(-1).styleId;
+	const favoriteId = await page.evaluate(key=>JSON.parse(localStorage.getItem(key)).accountFavorites.items.at(-1).styleId,STATE_KEY);
 	assert.deepEqual(favoriteWrites.at(-1), {add: favoriteId}, 'the account must receive one atomic add');
 	assert.deepEqual(favorites, [favoriteId], 'the account list must hold the favourite');
 	assert.equal(await page.locator('uni-button').filter({hasText: '★ 已收藏这个模板'}).count(), 1);
@@ -282,8 +282,13 @@ try {
 	assert.match(await anonymous.locator('.gallery-section').first().innerText(), /我的生成\s*00/, 'an anonymous browser must not show account pictures');
 	assert.equal(await anonymous.locator('uni-button[aria-label^="AI 生成记录"]').count(), 0);
 	assert.equal(await anonymous.locator('uni-button').filter({hasText: '登录后保存到云端'}).count(), 1);
-	assert.equal(await anonymous.locator('uni-button[aria-label^="收藏的模板"]').count(), 1, 'local favourites are still that device\'s own');
-	assert.ok((await anonymous.evaluate(key => JSON.parse(localStorage.getItem(key)).favorites.length, STATE_KEY)) > 0);
+	assert.equal(await anonymous.locator('uni-button[aria-label^="收藏的模板"]').count(), 0, 'account favourites must be hidden');
+	await anonymous.locator('[aria-label="导航 发现"]').click();
+	await anonymous.locator('.catalog-card').first().click();
+	await anonymous.locator('uni-button').filter({hasText:'☆ 收藏这个模板'}).click();
+	await anonymous.locator('.notice').filter({hasText:'未登录'}).waitFor();
+	assert.equal((await readFavorites(anonymous)).length,1);
+	await anonymous.locator('[aria-label="返回"]').click();
 	await anonymous.locator('.tabs uni-button[aria-label="导航 AI匹配"]').click();
 	const chooser = anonymous.waitForEvent('filechooser');
 	await anonymous.locator('uni-button').filter({hasText: '选择本地照片'}).click();
@@ -299,11 +304,12 @@ try {
 	// 6. A brand-new account adopts the favourites this device already has.
 	session = signedIn();
 	favorites = null;
-	await page.goto(url, {waitUntil: 'networkidle'});
-	const localFavorites = await page.evaluate(key => JSON.parse(localStorage.getItem(key)).favorites.map(f => f.styleId), STATE_KEY);
+	const localFavorites = (await readFavorites(page)).map(f=>f.styleId);
 	assert.ok(localFavorites.length > 0);
+	await page.goto(url, {waitUntil: 'networkidle'});
 	assert.deepEqual(favoriteWrites.at(-1)?.ids, localFavorites, 'the first sign-in must push the local list up');
 	assert.deepEqual(favorites, localFavorites);
+	assert.deepEqual(await readFavorites(page),[], 'successful adoption consumes the local-only items');
 	summary.push('favorites_adoption=OK');
 
 	// 7. A failed cloud delete must keep both copies and say so.

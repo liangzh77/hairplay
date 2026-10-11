@@ -14,8 +14,8 @@ export function filterStyles(category:string,query:string){const q=query.trim().
 // list is authoritative once it exists).
 export interface SavedStyle {id:string;styleId:string;name:string;image:string;created:string}
 export const FAVORITE_LIMIT=50;
-export interface State {version:1;bannerHidden:boolean;rememberOptions:boolean;options:Record<string,string>;favorites:SavedStyle[]}
-export const initialState=():State=>({version:1,bannerHidden:false,rememberOptions:true,options:{},favorites:[]});
+export interface State {version:1;bannerHidden:boolean;rememberOptions:boolean;options:Record<string,string>;favorites:SavedStyle[];favoritesSeparated:boolean;accountFavorites:{owner:string;items:SavedStyle[]}|null}
+export const initialState=():State=>({version:1,bannerHidden:false,rememberOptions:true,options:{},favorites:[],favoritesSeparated:true,accountFavorites:null});
 function mergeFavorites(preferred:unknown,legacy:unknown):SavedStyle[]{
  const out:SavedStyle[]=[];
  for(const source of [preferred,legacy])if(Array.isArray(source))for(const r of source){const saved=normalizeSavedStyle(r);if(saved&&!out.some(x=>x.styleId===saved.styleId))out.push(saved);}
@@ -34,7 +34,15 @@ export function decodeState(value:unknown):State{
  const safe=initialState();safe.bannerHidden=v.bannerHidden===true;safe.rememberOptions=v.rememberOptions!==false;
  if(v.options&&typeof v.options==='object') for(const k of ['风格类型','护理程度','偏好长度','发色偏好'])if(typeof v.options[k]==='string'&&v.options[k].length<30)safe.options[k]=v.options[k];
  safe.favorites=mergeFavorites(v.favorites,v.records);
+ safe.favoritesSeparated=v.favoritesSeparated===true;
+ if(v.accountFavorites&&typeof v.accountFavorites.owner==='string')safe.accountFavorites={owner:v.accountFavorites.owner,items:mergeFavorites(v.accountFavorites.items,null)};
  return safe;}catch{return initialState();}
+}
+// A successful first adoption consumes only the captured ids. A conflict keeps
+// every local item. Legacy mixed blobs retain ids absent from the account.
+export function settleLocalFavorites(state:State,accountIds:string[],adoptedIds:string[],initialized:boolean){
+ const consumed=initialized&&!state.favoritesSeparated?accountIds:adoptedIds;
+ return {...state,favorites:removeFavorites(state.favorites,consumed),favoritesSeparated:true};
 }
 export interface PhotoMeta {size:number;type:string;width?:number;height?:number}
 export function validatePhoto(p:PhotoMeta):string{

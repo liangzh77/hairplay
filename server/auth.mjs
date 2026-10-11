@@ -33,7 +33,6 @@ export class AuthStore{
    CREATE INDEX IF NOT EXISTS jobs_user ON jobs(user,state);
    CREATE TABLE IF NOT EXISTS gallery(id TEXT PRIMARY KEY,user INTEGER NOT NULL,name TEXT NOT NULL,style TEXT,created INTEGER NOT NULL,size INTEGER NOT NULL,bytes BLOB NOT NULL,hash TEXT);
    CREATE INDEX IF NOT EXISTS gallery_user ON gallery(user,created);
-   CREATE INDEX IF NOT EXISTS gallery_user_hash ON gallery(user,hash);
    CREATE TABLE IF NOT EXISTS favorites(user INTEGER PRIMARY KEY,ids TEXT NOT NULL,updated INTEGER NOT NULL);
   `);
   // Serialize check + migration across processes; legacy rows keep gender NULL.
@@ -43,6 +42,10 @@ export class AuthStore{
    // The content hash is what makes an import idempotent; older databases (a
    // rehearsal, or a release from before the column existed) are migrated here.
    if(!this.db.prepare('PRAGMA table_info(gallery)').all().some(col=>col.name==='hash'))this.db.exec('ALTER TABLE gallery ADD COLUMN hash TEXT');
+   this.db.exec('CREATE INDEX IF NOT EXISTS gallery_user_hash ON gallery(user,hash)');
+   // Backfill legacy pictures without changing their ids or bytes.
+   const update=this.db.prepare('UPDATE gallery SET hash=? WHERE id=?');
+   for(const row of this.db.prepare('SELECT id,bytes FROM gallery WHERE hash IS NULL').all())update.run(createHash('sha256').update(row.bytes).digest('hex'),row.id);
    this.db.exec('COMMIT');
   }catch(e){this.db.exec('ROLLBACK');throw e;}
   this.db.prepare('INSERT OR IGNORE INTO meta VALUES (?,?)').run('pepper',randomBytes(32).toString('hex'));

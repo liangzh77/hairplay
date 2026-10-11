@@ -1,6 +1,6 @@
 # 有型（HairPlay）发布
 
-公开地址：<https://liangz77.cn/hairplay/>。静态 H5 前端 + 独立服务端邮箱验证码登录（最多 100 个验证用户）和 Ark 图生图（每人终身最多 3 张成功图，失败不扣）；上传时只把照片发送一次、原照片不落盘不入库，生成结果保存在云端账户并在本机保留一份缓存（删除会同时删除云端副本），收藏的模板在登录后与账户同步，未登录时两者都只保存在本机浏览器。无支付。小程序仅做编译检查，邮箱登录/真实生成尚未接入且未真机验收。
+公开地址：<https://liangz77.cn/hairplay/>。静态 H5 前端 + 独立服务端邮箱验证码登录（最多 100 个验证用户）和 Ark 图生图（每人终身最多 3 张成功图，失败不扣）；上传时只把照片发送一次、原照片不落盘不入库，生成结果保存在云端账户并在本机保留一份缓存（删除会同时删除云端副本），收藏的模板在登录后与账户同步，退出仅隐藏账户相册与账户收藏，不删除云端数据；未登录新添收藏和未关联账户的历史生成记录只存本机。无支付。小程序仅做编译检查，邮箱登录/真实生成尚未接入且未真机验收。
 
 ## 本地构建检查
 
@@ -36,9 +36,9 @@ scripts/deploy-api.sh <版本号> [switch]   # 版本号形如 20261011T012345Z�
 3. 链接 `.data`/`.secrets`；`package-lock.json` 与上一版逐字节相同则 `cp -a` 复用旧 `node_modules`，否则 `npm ci --omit=dev --no-audit --no-fund`。
 4. 切换前冒烟：`node -e "import('./server/ark.mjs')"` 必须导出 `createApp` 且无副作用。
 5. 仅 root 可读的数据库备份 `sqlite3 /var/lib/hairplay/auth.sqlite ".backup '/var/lib/hairplay/backups/auth-before-api-<id>.sqlite'"`（0600 root:root）。
-6. 原子 `mv -Tf` 切换 `current`，`systemctl restart hairplay-api.service`，再探活 20×1 s：`curl http://127.0.0.1:8777/hairplay/api/session` 必须**恰好**返回 `{"account":null}`，且 `SELECT count(*) FROM users` 与切换前一致（证明共享的账号/额度账本没被发布动作扰动）。任何一步失败即切回旧版本、重启、重新探活，并打印 `API_PUBLISH_ROLLED_BACK current=…`。
+6. 原子 `mv -Tf` 切换 `current`，`systemctl restart hairplay-api.service`，再探活 20×1 s：`curl http://127.0.0.1:8777/hairplay/api/session` 必须 HTTP 200，且响应体的原始 **16 字节**与 `{"account":null}` 完全相同（curl 写临时文件，用 `cmp` 比较；拒绝 NUL/换行等后缀，不将响应体放进 bash 变量），且 `SELECT count(*) FROM users` 与切换前一致（仅证明用户行数未变，不替代额度内容验证）。任何一步失败即切回旧版本、重启、重新探活，并打印 `API_PUBLISH_ROLLED_BACK current=…`。
 
-`switch <id> <manifest> <checker>` 只做「校验目标发布树 → 原子切换 → 重启 → 探活」，用于回滚。旧版本目录和失败目录都保留（失败时给出路径便于排查），**同一版本号不能重复发布**，重发必须换新 id。`HAIRPLAY_API_ROOT|DATA|SECRETS|RESTART|HEALTH` 只用于隔离演练（`python3 scripts/test_api_remote_publish.py`，Linux 上跑，共 38 项断言：happy publish、覆盖拒绝、误体型/多一行/非 200 三种健康失败回滚、依赖重装、备份与软链接、篡改包与含密钥清单拒绝、switch 回滚/前滚等），**禁止在生产主机上设置**。演练里的 stub 服务把 stub restarter 写进健康文件的**原始字节**直接吐回来，所以演练验的是发布脚本真正看到的响应；注意 stub restarter 的 `case` 模式必须写成 `"$broken")` 这类单个带引号展开——`"releases/""$id"")` 在 bash 5.2 上会因为空串引号导致模式永不匹配并静默落入健康分支，使这些断言全部失效。
+`switch <id> <manifest> <checker>` 只做「校验目标发布树 → 原子切换 → 重启 → 探活」，用于回滚。旧版本目录和失败目录都保留（失败时给出路径便于排查），**同一版本号不能重复发布**，重发必须换新 id。`HAIRPLAY_API_ROOT|DATA|SECRETS|RESTART|HEALTH` 只用于隔离演练（`python3 scripts/test_api_remote_publish.py`，Linux 上跑，共 53 项断言：happy publish、覆盖拒绝、错误响应体/多一行/NUL 后缀/尾随换行/尾随空行/非 200 健康失败回滚、依赖重装、备份与软链接、篡改包与含密钥清单拒绝、switch 回滚/前滚等），**禁止在生产主机上设置**。演练里的 stub 服务把 stub restarter 写进健康文件的**原始字节**直接吐回来，所以演练验的是发布脚本真正看到的响应；注意 stub restarter 的 `case` 模式必须写成 `"$broken")` 这类单个带引号展开——`"releases/""$id"")` 在 bash 5.2 上会因为空串引号导致模式永不匹配并静默落入健康分支，使这些断言全部失效。
 
 `/hairplay/api/*` 之外没有 `/health` 路由（直接访问 404），线上健康检查只认 `/hairplay/api/session`。发布顺序固定为**先 API、后静态**：旧前端会忽略新增的响应字段，而新前端依赖新的 `POST /api/gallery/*`，先发 API 才不会出现 404 窗口。
 

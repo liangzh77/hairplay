@@ -65,7 +65,8 @@ export async function mutateState(mutate:(state:State)=>State):Promise<{ok:boole
  try{return await withStorageLock(KEY,()=>{
  let last='';
  for(let attempt=0;attempt<MUTATE_ATTEMPTS;attempt++){
-  const next=mutate(loadState());
+  const before=loadState(),next=mutate(before);
+  if(JSON.stringify(before)===JSON.stringify(next))return {ok:true,message:''};
   last=storeState(next);
   if(last)return {ok:false,message:last};
   // Read back before claiming success: a write another tab overwrote is a
@@ -327,11 +328,12 @@ export async function downloadStyle(url:string,name:string):Promise<string>{
 }
 // Download the untouched 2K original from the account, not the downscaled local
 // copy. Same-origin with the session cookie, so the anchor download works.
-export async function downloadCloudImage(id:string,name:string):Promise<string>{
+export async function downloadCloudImage(id:string,name:string,current:()=>boolean=()=>true):Promise<string>{
  // #ifdef H5
  let response:Response;try{response=await fetch(apiBase()+'gallery/'+id,{credentials:'same-origin',cache:'no-store'});}catch{throw Error('无法连接有型服务，请检查网络后重试');}
  if(!response.ok)throw Error(response.status===404?'这张图片已不在云端账户中':'云端原图下载失败，请稍后重试');
  const blob=await response.blob();
+ if(!current())throw Error('账户已变更，已取消旧账户图片下载');
  if(blob.size<1_024||blob.size>4*1024*1024)throw Error('云端原图大小异常，已取消下载');
  const objectUrl=URL.createObjectURL(blob);
  const a=document.createElement('a');a.href=objectUrl;a.download=`HairPlay-AI-${name||'style'}.jpg`;document.body.appendChild(a);a.click();a.remove();

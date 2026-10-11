@@ -133,6 +133,9 @@ def main():
             'extra="releases/$HAIRPLAY_REHEARSAL_EXTRA_ID"\n'
             'fail="releases/$HAIRPLAY_REHEARSAL_FAIL_ID"\n'
             'case "$target" in\n'
+            '  "releases/20270108T000000Z") printf \'%s\\0\' \'{"account":null}\' > "$HAIRPLAY_REHEARSAL_HEALTH" ;;\n'
+            '  "releases/20270109T000000Z") printf \'%s\\n\' \'{"account":null}\' > "$HAIRPLAY_REHEARSAL_HEALTH" ;;\n'
+            '  "releases/20270110T000000Z") printf \'%s\\n\\n\' \'{"account":null}\' > "$HAIRPLAY_REHEARSAL_HEALTH" ;;\n'
             '  "$broken") printf %s \'{"account":"broken"}\' > "$HAIRPLAY_REHEARSAL_HEALTH" ;;\n'
             '  "$extra") printf \'%s\\n%s\' \'{"account":null}\' \'{"extra":true}\' > "$HAIRPLAY_REHEARSAL_HEALTH" ;;\n'
             '  "$fail") rm -f "$HAIRPLAY_REHEARSAL_HEALTH" ;;\n'
@@ -211,6 +214,15 @@ def main():
         check('extra health line rolled back', 'API_PUBLISH_ROLLED_BACK' in result.stderr, result.stderr[-400:])
         check('extra release not served', os.readlink(root / 'current') == f'releases/{OK_ID}')
         check('health body rewrote itself', health.read_text() == OK_BODY)
+
+        for label, release_id in [('NUL suffix', '20270108T000000Z'), ('trailing newline', '20270109T000000Z'), ('trailing blank line', '20270110T000000Z')]:
+            bad_archive, bad_manifest = pack(label.replace(' ', '-'))
+            result = publish(release_id, bad_archive, bad_manifest)
+            check(label + ' refused', result.returncode == 1 and 'API_PUBLISH_OK' not in result.stdout, result.stderr[-400:])
+            check(label + ' rolled back', 'API_PUBLISH_ROLLED_BACK' in result.stderr)
+            check(label + ' not served', os.readlink(root / 'current') == f'releases/{OK_ID}')
+            check(label + ' preserved', (root / 'releases' / release_id).is_dir())
+            check(label + ' recovered', health.read_bytes() == OK_BODY.encode())
 
         # 3b. The documented rollback command republishes the older release.
         old_archive, old_manifest = pack('old-tree')

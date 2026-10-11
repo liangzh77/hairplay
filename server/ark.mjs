@@ -95,6 +95,8 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
     auth.setGender(user.id,input.gender);json(res,200,{ok:true});return;
    }
    if(route==='/api/favorites'){
+    if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).length!==1||!['ids','add','remove'].includes(Object.keys(input)[0])){json(res,400,{error:'收藏操作无效'});return;}
+    if('ids' in input&&!Array.isArray(input.ids)){json(res,400,{error:'收藏列表无效'});return;}
     // Editing is one atomic add/remove on the server's current list so two devices
     // editing from stale snapshots cannot resurrect each other's removals. Sending
     // the whole list is only how a fresh account adopts the favourites this device

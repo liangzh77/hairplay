@@ -1,11 +1,13 @@
 // Regression for Vite file-server bypasses. Uses ONLY a fake fixture, never reads credentials.
 import {spawn} from 'node:child_process';
-import {writeFileSync,rmSync} from 'node:fs';
+import {writeFileSync,rmSync,mkdirSync,rmdirSync} from 'node:fs';
 import {resolve} from 'node:path';
 import assert from 'node:assert/strict';
 const root=resolve(import.meta.dirname,'..');
 const fixture=resolve(root,'.secrets/__dev-security-fake.txt');
 const port=18765,base=`http://127.0.0.1:${port}`;
+let madeDirectory=false;
+try{mkdirSync(resolve(root,'.secrets'),{mode:0o700});madeDirectory=true;}catch(e){if(e.code!=='EEXIST')throw e;}
 writeFileSync(fixture,'not-a-real-secret-fixture\n',{mode:0o600,flag:'wx'});
 const child=spawn(process.execPath,[resolve(root,'node_modules/.bin/uni'),'--host','127.0.0.1','--port',String(port),'--strictPort'],{cwd:resolve(root,'client'),detached:process.platform!=='win32',stdio:'ignore'});
 try{
@@ -29,4 +31,5 @@ try{
 }finally{
  if(child.exitCode===null){try{if(process.platform==='win32')child.kill();else process.kill(-child.pid,'SIGTERM');}catch{child.kill();}}
  rmSync(fixture,{force:true});
+ if(madeDirectory)rmdirSync(resolve(root,'.secrets'));
 }
