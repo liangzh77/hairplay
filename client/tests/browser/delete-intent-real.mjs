@@ -11,8 +11,16 @@ async function run(kind){
   const B=store.addImage(a.id,{name:'稳定目标 B'},await readRepo('client/src/static/catalog/ai-catalog-44-1.jpg'));
   const two=await context.newPage();two.setDefaultTimeout(5000);
   const requests=[],responses=[],pending=[],errors=[];
-  context.on('request',r=>{if(r.url().endsWith('/gallery/delete')){const token=r.headers().cookie?.match(/hairplay=([^;]+)/)?.[1];requests.push({id:r.postDataJSON().id,context:r.headers()['x-hairplay-context'],owner:store.session(token)?.email});}});
-  context.on('response',r=>{if(r.url().endsWith('/gallery/delete'))pending.push(r.json().then(body=>responses.push({status:r.status(),body})));});
+  context.on('request',r=>{if(r.url().endsWith('/gallery/delete')){
+   const token=r.headers().cookie?.match(/hairplay=([^;]+)/)?.[1];
+   requests.push({id:r.postDataJSON().id,context:r.headers()['x-hairplay-context'],owner:store.session(token)?.email});
+   // Register at request time: a committed POST may not have delivered its response yet.
+   const parsed=context.waitForEvent('response',{predicate:response=>response.request()===r})
+    .then(async response=>responses.push({status:response.status(),body:await response.json()}));
+   parsed.catch(()=>{}); // The shared barrier below propagates failures, not an event callback.
+   pending.push(parsed);
+  }});
+  const collectResponses=()=>Promise.all(pending);
   for(const p of [one,two]){p.on('pageerror',e=>errors.push(e.message));await p.goto(f.url,{waitUntil:'networkidle'});await p.waitForFunction(k=>JSON.parse(localStorage.getItem(k)||'[]').length===2,GENERATIONS_KEY);await nav(p,'画廊');}
   const open=async(p,name)=>{await p.locator(`[aria-label="AI 生成记录 稳定目标 ${name}"]`).click();await btn(p,'删除这张').click();assert.ok((await p.locator('.modal-copy').innerText()).includes('稳定目标 '+name));};
   if(kind.startsWith('batch')){
@@ -39,10 +47,35 @@ async function run(kind){
    assert.equal(await btn(two,'确认删除').count(),0);release();assert.equal(requests.length,0);assert.equal(store.countImages(a.id),2);
    const cookie=(await context.cookies()).find(c=>c.name==='hairplay');assert.notEqual(store.session(cookie.value).context,contextBefore);
   }else if(kind==='cancel'||kind==='batch-cancel'){
+   let captured;
+   if(process.env.HOLD_DELETE_RESPONSE==='1'){
+    const held200=new Promise(r=>release=r);
+    let capture;
+    captured=new Promise(resolve=>capture=resolve);
+    await two.route('**/api/gallery/delete',async route=>{
+     const response=await route.fetch();
+     capture({status:response.status(),body:await response.json()});
+     await held200;await route.fulfill({response});
+    });
+   }
    await two.locator('.modal uni-button').filter({hasText:/^取消$/}).click();assert.equal(await btn(two,'确认删除').count(),0);assert.equal(requests.length,0);
    // Reopening must capture A, not the cancelled B.
    if(kind==='batch-cancel')await btn(two,'取消').click();else await two.locator('[aria-label="返回"]').click();await open(two,'A');await btn(two,'确认删除').click();await poll(()=>store.countImages(a.id)===1);
    assert.equal(requests[0].id,A.id);assert.equal(store.listImages(a.id)[0].id,B.id);
+   if(captured){
+    const original=await captured;
+    assert.equal(original.status,200);assert.equal(original.body.deleted,true);assert.equal(original.body.revision,3);
+    let complete=false;
+    const barrier=collectResponses().then(()=>{complete=true;});
+    // A browser round-trip checkpoints microtasks, not a sleep or a retry for green.
+    const heldUI=await two.evaluate(()=>({copy:document.querySelector('.modal-copy')?.textContent,disabled:document.querySelector('.modal .danger')?.hasAttribute('disabled')}));
+    assert.equal(complete,false,'collector must wait for the held response and parsed body');
+    assert.equal(pending.length,1);assert.equal(responses.length,0);
+    assert.equal(store.gallerySnapshot(a.id).revision,3);
+    assert.ok(heldUI.copy.includes('稳定目标 A'));assert.equal(heldUI.disabled,true);
+    console.log('DELETE_COLLECTOR_HELD '+JSON.stringify({kind,noBC:process.env.NO_BC==='1',original,requests,responses,pendingCount:pending.length,sqlite:store.gallerySnapshot(a.id),heldUI,complete}));
+    release();await barrier;assert.equal(complete,true);
+   }
   }else{
    let getSeen=false;
    const held=new Promise(r=>release=r);
@@ -69,7 +102,11 @@ async function run(kind){
    const expected=kind==='batch-peer'?[A.id,A.id,B.id]:kind==='batch-partial'?[A.id,B.id]:kind==='single-failure'?[B.id]:kind==='already-deleted'?[B.id,B.id]:[A.id,B.id];
    assert.deepEqual(requests.map(r=>r.id),expected);
   }
-  await Promise.all(pending);
+  // Other mutation branches already wait for UI completion (and thus all batch requests).
+  // Cancel/reopen has exactly one request; identity-cancel branches have none.
+  await collectResponses();
+  await btn(two,'确认删除').waitFor({state:'hidden'});
+  assert.equal(responses.length,requests.length);
   assert.ok(requests.every(r=>r.owner===a.email&&r.context===contextBefore));assert.deepEqual(errors,[]);assert.equal(f.s.upstreamCalls,0);
   const snapshot=store.gallerySnapshot(a.id);
   const successCount=responses.filter(r=>r.status===200&&r.body.deleted).length;
