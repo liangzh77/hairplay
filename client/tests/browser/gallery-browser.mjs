@@ -169,8 +169,12 @@ try {
 	const page = await context.newPage();
 	const watch = p => p.on('pageerror', e => errors.push(e.message));
 	watch(page);
-	const generateOnce = async target => {
-		await target.locator('.tabs uni-button[aria-label="导航 AI匹配"]').click();
+	const generateOnce = async (target, fromStyle = false) => {
+		if (fromStyle) {
+			await target.locator('.tabs uni-button[aria-label="导航 发现"]').click();
+			await target.locator('.catalog-card[aria-label="查看 庞巴杜发型"]').click();
+			await target.locator('.style-photo').waitFor();
+		} else await target.locator('.tabs uni-button[aria-label="导航 AI匹配"]').click();
 		const chooser = target.waitForEvent('filechooser');
 		await target.locator('uni-button').filter({hasText: '选择本地照片'}).click();
 		(await chooser).setFiles(photoPath);
@@ -183,9 +187,10 @@ try {
 	};
 	const generatedNotice = target => target.locator('.notice').filter({hasText: '生成图片已保存到云端账户'}).waitFor();
 
-	// 1. A signed-in generation is stored in the account and cached locally.
+	// 1. Generate from a selected style (not just the AI tab): viewing the gallery
+	// must exit that higher-priority detail screen and show the saved result.
 	await page.goto(url, {waitUntil: 'networkidle'});
-	const confirmCopy = await generateOnce(page);
+	const confirmCopy = await generateOnce(page, true);
 	assert.equal(confirmCopy, '您选中的照片将由有型服务端发送至火山方舟 Seedream 进行发型编辑，消耗云端额度（每账户终身 3 张，失败不扣）。生成结果会保存到您的云端账户——在其它设备登录同一邮箱也能看到——并在本机保留一份缓存；上传的原照片不会被保存。不要上传未经他人同意的照片。', 'the upload confirmation must state where the picture goes');
 	await generatedNotice(page);
 	assert.equal(generateCalls, 1);
@@ -195,9 +200,13 @@ try {
 	assert.ok(cached.id.startsWith('gen-') && cached.image.startsWith('data:image/jpeg;base64,'));
 	assert.ok(!cached.image.includes(styleB64), 'only the downscaled copy is cached');
 	assert.equal(cached.name, '庞巴杜发型');
-	await page.locator('uni-button').filter({hasText: '查看相册'}).click();
+	await page.locator('uni-button').filter({hasText: '查看画廊'}).click();
 	await cards(page).first().waitFor();
+	assert.equal(await page.locator('.style-photo').count(), 0, 'the selected style must not mask the gallery');
+	assert.equal(await page.locator('.modal').count(), 0, 'the result dialog must close');
+	assert.equal(await page.locator('.tabs .current').getAttribute('aria-label'), '导航 画廊');
 	assert.equal(await cards(page).count(), 1);
+	assert.equal(await cards(page).first().getAttribute('aria-label'), `AI 生成记录 ${cached.name}`);
 	assert.match(await page.locator('.gallery-section').first().innerText(), /我的生成\s*01/);
 	assert.match(await page.locator('.card-badge.ai').first().innerText(), /AI 生成 · 云端/);
 	assert.match(await page.locator('.gallery-section').nth(1).innerText(), /收藏的模板\s*00/);
@@ -333,7 +342,7 @@ try {
 	const before = await readGenerations(page);
 	const deletesBefore = deleteCalls;
 	deleteFailures = true;
-	await page.locator('uni-button').filter({hasText: '查看相册'}).click();
+	await page.locator('uni-button').filter({hasText: '查看画廊'}).click();
 	await cards(page).first().click();
 	await page.locator('uni-button').filter({hasText: '删除这张'}).click();
 	await page.locator('uni-button').filter({hasText: '确认删除'}).click();
@@ -363,7 +372,7 @@ try {
 	await lost.goto(url, {waitUntil: 'networkidle'});
 	await generateOnce(lost);
 	await generatedNotice(lost);
-	await lost.locator('uni-button').filter({hasText: '查看相册'}).click();
+	await lost.locator('uni-button').filter({hasText: '查看画廊'}).click();
 	assert.equal(await cards(lost).count(), 1);
 	const dropGenerationWrites = () => lost.evaluate(() => { const original = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { if (String(k).includes('hairplay.generations.v1')) return; return original.call(this, k, v); }; });
 	await dropGenerationWrites();
