@@ -10,12 +10,12 @@ const cards=p=>p.locator('uni-button[aria-label^="AI 生成记录"]');
 const favcards=p=>p.locator('uni-button[aria-label^="收藏的模板"]');
 const waitFor=async(fn)=>{for(let i=0;i<100;i++){if(await fn())return;await new Promise(r=>setTimeout(r,50))}throw Error('condition timeout')};
 const logout=async p=>{await p.locator('[aria-label="导航 个人资料"]').click();await btn(p,'退出登录').click();await p.locator('.auth-message').filter({hasText:'已退出登录'}).waitFor()};
-async function setup({records=[],noLocks=false,images=[row],favoriteState={ids:[],initialized:true},holdGallery=false,holdFavorite=false,holdGeneration=false,holdImport=false,holdSession=false,localFavorites=[],adoptionConflict=false}={}){
+async function setup({records=[],noLocks=false,images=[row],favoriteState={ids:[],initialized:true},holdGallery=false,holdFavorite=false,holdGeneration=false,holdImport=false,holdSession=false,holdOtherFavorites=false,localFavorites=[],adoptionConflict=false}={}){
  const context=await browser.newContext({viewport:{width:390,height:844}});contexts.push(context);
  await context.addInitScript(({records,noLocks,key,localFavorites,stateKey})=>{if(!localStorage.getItem(key)){localStorage.setItem(key,JSON.stringify(records));localStorage.setItem(stateKey,JSON.stringify({version:1,favorites:localFavorites}));}window.storageWrites=[];const orig=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){window.storageWrites.push(k);return orig.call(this,k,v)};if(noLocks)Object.defineProperty(navigator,'locks',{configurable:true,value:undefined})},{records,noLocks,key:GENERATIONS_KEY,localFavorites,stateKey:STATE_KEY});
  const page=await context.newPage();page.setDefaultTimeout(5000);
  const state={session:account,images,imageGets:0,galleryStarted:false,favoritePosts:[],favoriteStarted:false,generateStarted:false,importCalls:0};
- const gate=new Promise(r=>state.release=r),fgate=new Promise(r=>state.releaseFavorite=r),ggate=new Promise(r=>state.releaseGeneration=r),igate=new Promise(r=>state.releaseImport=r),sgate=new Promise(r=>state.releaseSession=r);
+ const gate=new Promise(r=>state.release=r),fgate=new Promise(r=>state.releaseFavorite=r),ggate=new Promise(r=>state.releaseGeneration=r),igate=new Promise(r=>state.releaseImport=r),sgate=new Promise(r=>state.releaseSession=r),bgate=new Promise(r=>state.releaseOther=r);
  await context.route('**/api/**',async route=>{
  const req=route.request(),path=new URL(req.url()).pathname.split('/api/')[1];const json=(body,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
  if(path==='session'){const captured=state.session;if(holdSession&&state.generateStarted){state.sessionStarted=true;await sgate;}return json({account:captured})}
@@ -32,6 +32,7 @@ async function setup({records=[],noLocks=false,images=[row],favoriteState={ids:[
    else if(body.remove)favoriteState.ids=favoriteState.ids.filter(id=>id!==body.remove);
    return json({ok:true,ids:favoriteState.ids,initialized:true});
   }
+  if(holdOtherFavorites&&state.session?.email==='other@example.invalid'){state.otherStarted=true;await bgate;return json({ids:['catalog-44-1'],initialized:true});}
   return json(favoriteState);
  }
  if(path==='gallery'){state.galleryStarted=true;const snapshot=[...state.images];if(holdGallery)await gate;return json({images:snapshot})}
@@ -143,11 +144,14 @@ await run('late refresh',async()=>{
 });
 await run('account switch and local conflict',async()=>{
  const local=[{id:'fav-catalog-53-1',styleId:'catalog-53-1',name:'庞巴杜发型',image:'/static/catalog/ai-catalog-53-1.jpg',created}];
- const {page,state}=await setup({images:[],localFavorites:local,favoriteState:{ids:[],initialized:false},adoptionConflict:true});await gallery(page);await waitFor(async()=>await favcards(page).count()===1);assert.equal((await readFavorites(page)).length,1);
+ const {page,state}=await setup({images:[],localFavorites:local,favoriteState:{ids:[],initialized:false},adoptionConflict:true,holdOtherFavorites:true});await gallery(page);await waitFor(async()=>await favcards(page).count()===1);assert.equal((await readFavorites(page)).length,1);
  await logout(page);await gallery(page);assert.equal(await favcards(page).count(),1);
  await page.locator('[aria-label="导航 个人资料"]').click();await page.locator('#auth-email input').fill('other@example.invalid');await page.locator('#auth-code input').fill('123456');await btn(page,'注册 / 登录').click();await page.locator('.auth-message').filter({hasText:'登录成功'}).waitFor();await gallery(page);
  assert.equal(state.session.email,'other@example.invalid');assert.equal((await readFavorites(page)).length,1);
- console.log('F9 ADOPTION_409 local_unique_preserved=true account_switch=true CLOSED');
+ await waitFor(()=>state.otherStarted);assert.equal(await favcards(page).count(),0,'no previous-account flash while B sync is pending');
+ state.releaseOther();await waitFor(async()=>await favcards(page).count()===1);
+ const stored=await page.evaluate(key=>JSON.parse(localStorage.getItem(key)).accountFavorites,STATE_KEY);assert.equal(stored.owner,'other@example.invalid');assert.deepEqual(stored.items.map(f=>f.styleId),['catalog-44-1']);
+ console.log('F9 ADOPTION_409 local_unique_preserved=true account_switch_no_old_flash=true CLOSED');
 });
 await run('content readback',async()=>{
  const local=record();delete local.cloud;const {page}=await setup({records:[local],images:[]});
