@@ -7,10 +7,11 @@ import {dirname, resolve} from 'node:path';
 const projectRoot=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const catalog=JSON.parse(await readFile(resolve(projectRoot,'client/src/core/catalog.json'),'utf8'));
 const styles=new Map(catalog.map(({id,image})=>[id,image]));
+const styleNames=new Map(catalog.map(({id,name})=>[id,name]));
 const requestLimit=12*1024*1024;
 const imageLimit=8*1024*1024;
 import sharp from 'sharp';
-import {AuthStore,normalizeEmail,validEmail,validGender} from './auth.mjs';
+import {AuthStore,normalizeEmail,validEmail,validGender,GALLERY_MAX_BYTES,FAVORITE_LIMIT,validStyleId} from './auth.mjs';
 import {loadMailer} from './mail.mjs';
 
 export async function loadConfig(file=resolve(projectRoot,'.secrets/ark.env')){
@@ -50,7 +51,8 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
  return createServer(async(req,res)=>{
   try{
   if(req.url==='/health'&&req.method==='GET'){json(res,200,{status:'ok',imageGeneration:true});return;}
-  const route=req.url?.startsWith(base+'api/')?'/api/'+req.url.slice((base+'api/').length):'';
+  const pathname=req.url?.split('?')[0]||'';
+  const route=pathname.startsWith(base+'api/')?'/api/'+pathname.slice((base+'api/').length):'';
   const origin=req.headers.origin||'';
   if((origin&&!origins.includes(origin))||(req.method==='POST'&&(!origins.includes(origin)||req.headers['content-type']?.split(';')[0]!=='application/json'))){json(res,403,{error:'请求来源不允许'});return;}
   const user=auth.session(token(req));
@@ -58,10 +60,27 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
   // which overwrites X-Real-IP; local/dev callers cannot bypass the IP budget.
   const forwarded=trustLoopbackProxy&&secure&&req.socket.remoteAddress==='127.0.0.1'&&typeof req.headers['x-real-ip']==='string'&&/^[0-9a-fA-F:.]{3,45}$/.test(req.headers['x-real-ip'])?req.headers['x-real-ip']:req.socket.remoteAddress||'unknown';
   if(route==='/api/session'&&req.method==='GET'){json(res,200,{account:user?{email:user.email,gender:user.gender??null,remaining:auth.remaining(user.id)}:null});return;}
-  if(!['/api/generate','/api/auth/code','/api/auth/login','/api/auth/logout','/api/auth/gender'].includes(route)||req.method!=='POST'){json(res,404,{error:'Not found'});return;}
+  // The account's cloud album. Only metadata is listed; the bytes are served one
+  // picture at a time, ownership-checked, and never reach a shared cache.
+  if(route==='/api/gallery'&&req.method==='GET'){
+   if(!user){json(res,401,{error:'请先使用邮箱登录'});return;}
+   json(res,200,{images:auth.listImages(user.id).map(r=>({id:r.id,name:r.name,style:r.style,created:new Date(r.created).toISOString(),size:r.size}))});return;}
+  const galleryId=req.method==='GET'?/^\/api\/gallery\/([0-9a-f]{24})$/.exec(route)?.[1]:undefined;
+  if(galleryId){
+   if(!user){json(res,401,{error:'请先使用邮箱登录'});return;}
+   const row=auth.image(user.id,galleryId);
+   if(!row){json(res,404,{error:'Not found'});return;}
+   const picture=Buffer.from(row.bytes);
+   res.writeHead(200,{'content-type':'image/jpeg','content-length':String(picture.length),'cache-control':'private, max-age=31536000, immutable','x-content-type-options':'nosniff','referrer-policy':'no-referrer'});
+   res.end(picture);return;}
+  if(route==='/api/favorites'&&req.method==='GET'){
+   if(!user){json(res,401,{error:'请先使用邮箱登录'});return;}
+   const ids=auth.favorites(user.id);json(res,200,{ids:ids??[],initialized:ids!==null});return;}
+  const post=['/api/generate','/api/auth/code','/api/auth/login','/api/auth/logout','/api/auth/gender','/api/gallery/delete','/api/gallery/import','/api/favorites'];
+  if(!post.includes(route)||req.method!=='POST'){json(res,404,{error:'Not found'});return;}
   if(route==='/api/auth/logout'){auth.logout(token(req));res.setHeader('set-cookie',cookie(''));json(res,200,{ok:true});return;}
-  if((route==='/api/generate'||route==='/api/auth/gender')&&!user){json(res,401,{error:'请先使用邮箱登录'});return;}
-  const limit=route==='/api/generate'?requestLimit:2048;
+  if((route==='/api/generate'||route==='/api/auth/gender'||route==='/api/gallery/delete'||route==='/api/gallery/import'||route==='/api/favorites')&&!user){json(res,401,{error:'请先使用邮箱登录'});return;}
+  const limit=route==='/api/generate'?requestLimit:route==='/api/gallery/import'?imageLimit:route==='/api/favorites'?8192:2048;
   if(Number(req.headers['content-length'])>limit){json(res,413,{error:'请求过大'});return;}
   const chunks=[];let size=0;let job;let ownsActive=false;
   if(route==='/api/generate'){if(active){json(res,429,{error:'当前生成任务繁忙'});return;}active=true;ownsActive=true;}
@@ -71,6 +90,26 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
    if(route==='/api/auth/gender'){
     if(!validGender(input.gender)){json(res,400,{error:'请选择男、女或不填写'});return;}
     auth.setGender(user.id,input.gender);json(res,200,{ok:true});return;
+   }
+   if(route==='/api/favorites'){
+    if(!Array.isArray(input.ids)||input.ids.length>FAVORITE_LIMIT||!input.ids.every(validStyleId)){json(res,400,{error:'收藏列表无效'});return;}
+    const ids=[...new Set(input.ids)];auth.setFavorites(user.id,ids);json(res,200,{ok:true,ids});return;
+   }
+   if(route==='/api/gallery/delete'){
+    // Idempotent on purpose: deleting a picture another device already removed is
+    // a success for this device, and saying so is how the client avoids
+    // resurrecting it from a stale local copy.
+    if(typeof input.id!=='string'||!/^[0-9a-f]{24}$/.test(input.id)){json(res,400,{error:'图片编号无效'});return;}
+    json(res,200,{ok:true,deleted:auth.deleteImage(user.id,input.id)});return;
+   }
+   if(route==='/api/gallery/import'){
+    const match=/^data:image\/jpeg;base64,([A-Za-z0-9+/]+={0,2})$/.exec(typeof input.image==='string'?input.image:'');
+    const bytes=match?Buffer.from(match[1],'base64'):null;
+    if(!bytes||bytes.length<1024||bytes.length>GALLERY_MAX_BYTES||bytes.toString('base64')!==match[1]||bytes[0]!==255||bytes[1]!==216||bytes[bytes.length-2]!==255||bytes[bytes.length-1]!==217){json(res,400,{error:'只能上传 4 MB 以内、结构完整的 JPEG 图片'});return;}
+    try{await sharp(bytes,{limitInputPixels:25_000_000}).stats();}catch{json(res,400,{error:'图片无法解码，已拒绝保存'});return;}
+    let saved;try{saved=auth.addImage(user.id,{name:typeof input.name==='string'?input.name:'AI 发型',style:input.style},bytes);}
+    catch(e){json(res,e.status||400,{error:e.status===429?e.message:'图片无法保存到云端'});return;}
+    json(res,200,{id:saved.id,created:new Date(saved.created).toISOString(),remaining:auth.remaining(user.id)});return;
    }
    const email=normalizeEmail(input.email);
    if(route==='/api/auth/code'){
@@ -106,8 +145,10 @@ export function createApp({config,auth,mailer,origins=['http://127.0.0.1:8767','
    const result=Buffer.from(raw,'base64');
    if(result.length<50000||result.length>12_000_000||result.toString('base64')!==raw||result[0]!==255||result[1]!==216)throw Error('火山方舟返回的图片格式不正确');
    await sharp(result,{limitInputPixels:25_000_000}).stats();
-   auth.finish(job,true);job=null;
-   json(res,200,{image:'data:image/jpeg;base64,'+raw,remaining:auth.remaining(user.id)});
+   // One commit: consume the quota and keep the cloud copy of the generated
+   // picture. `job=null` only after that commit, so a storage failure refunds it.
+   const saved=auth.finishWithImage(job,{name:styleNames.get(input.styleId),style:input.styleId},result);job=null;
+   json(res,200,{image:'data:image/jpeg;base64,'+raw,remaining:auth.remaining(user.id),record:saved?{id:saved.id,created:new Date(saved.created).toISOString()}:null});
   }catch(e){json(res,e.status|| (job?502:400),{error:job?'生成失败，请稍后重试；未扣成功额度':e.status===429?e.message:'请求无效，请检查输入'});}
   finally{try{if(job)auth.finish(job,false);}finally{if(ownsActive)active=false;}}
   }catch{

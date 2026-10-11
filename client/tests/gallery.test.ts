@@ -5,21 +5,40 @@ import {readFileSync} from 'node:fs';
 const page=()=>readFileSync(new URL('../src/pages/index/index.vue',import.meta.url),'utf8');
 const platform=()=>readFileSync(new URL('../src/platform/index.ts',import.meta.url),'utf8');
 
-test('gallery separates AI generations from catalog templates',()=>{
+test('gallery separates AI generations from saved templates',()=>{
  const ui=page();
  assert.match(ui,/class="section-head"><text class="section-title">我的生成<\/text>/);
- assert.match(ui,/class="section-head"><text class="section-title">模板示例<\/text>/);
- assert.match(ui,/class="card-badge ai">AI 生成</);
+ assert.match(ui,/class="section-head"><text class="section-title">收藏的模板<\/text>/);
+ assert.match(ui,/class="card-badge ai">\{\{g\.cloud\?'AI 生成 · 云端':'AI 生成 · 仅本机'\}\}/);
  assert.match(ui,/class="card-badge template">模板 · 非 AI 生成</);
+ // No demo mode is left anywhere in the product UI.
+ assert.doesNotMatch(ui,/演示|demo|LocalGenerationService|saveResult/);
  // Generated pictures are data URLs: they must never be passed through the
  // public asset URL builder, which only knows catalog paths.
- assert.match(ui,/<image :src="g\.image" mode="aspectFill" \/>/);
+ assert.match(ui,/<image v-if="g\.image" :src="g\.image" mode="aspectFill" \/>/);
  assert.match(ui,/<image :src="generatedDetail\.image" mode="aspectFit" \/>/);
  assert.match(ui,/generations=ref<GeneratedRecord\[\]>\(loadGenerations\(\)\)/);
  assert.doesNotMatch(ui,/assetUrl\(g\.image\)|assetUrl\(generatedDetail\.image\)/);
 });
 
-test('successful generation is stored locally and disclosed before upload',()=>{
+test('the account album is authoritative and its pictures are cached locally',()=>{
+ const ui=page(),layer=platform();
+ assert.match(ui,/async function syncCloudAlbum\(\)/);
+ assert.match(ui,/const images=await cloudAlbum\(\);cloudImages\.value=images/);
+ // A cached picture that is gone from the account is purged, so a deletion made
+ // on another device can never be resurrected by this browser's cache.
+ assert.match(ui,/generations\.value\.some\(r=>r\.cloud&&!live\.has\(r\.cloud\)\)&&await commitGenerations\(list=>list\.filter\(r=>!r\.cloud||live\.has\(r\.cloud\)\)\)/);
+ assert.match(ui,/const cached=new Map\(generations\.value\.filter\(r=>r\.cloud\)/);
+ assert.match(ui,/for\(const r of generations\.value\)if\(!r\.cloud\)list\.push/);
+ assert.match(ui,/async function cacheCloudImages\(images:CloudImage\[\]\)/);
+ assert.match(ui,/const raw=await cloudImageData\(img\.id\);const stored=await prepareGeneratedImage\(raw\)/);
+ assert.match(ui,/await commitGenerations\(list=>list\.some\(r=>r\.cloud===img\.id\)\?list:insertGeneration\(list,makeGeneratedRecord\(img\.name,stored,img\.id\)\)\)/);
+ // A picture that only exists on this device can be pushed to the account.
+ assert.match(ui,/const saved=await cloudImport\(item\.image,item\.name\)/);
+ assert.match(ui,/async function syncToCloud\(item:AlbumItem\)\{if\(item\.cloud\)return;/);
+});
+
+test('successful generation is stored in the account and disclosed before upload',()=>{
  const ui=page(),layer=platform();
  assert.match(ui,/commitGenerations\(list=>insertGeneration\(list,record\)\)/);
  assert.match(ui,/prepareGeneratedImage\(image\)/);
@@ -28,6 +47,7 @@ test('successful generation is stored locally and disclosed before upload',()=>{
  assert.match(layer,/export async function withStorageLock/);
  assert.match(layer,/await locks\.request\(`hairplay\.storage\.\$\{key\}`/);
  assert.match(layer,/return await withStorageLock\(GEN_KEY,\(\)=>/);
+ assert.match(ui,/return await withStorageLock\('hairai\.study\.v1',\(\)=>/);
  // A tab that wedges while holding the lock must fail honestly, never write unsynchronized.
  assert.match(layer,/另一个标签页正在写入本机相册，本次操作未生效，请稍后重试/);
  assert.match(layer,/controller\.abort\(\),LOCK_TIMEOUT_MS\)/);
@@ -35,39 +55,67 @@ test('successful generation is stored locally and disclosed before upload',()=>{
  // runtime (no window) has a single instance and writes directly.
  assert.match(layer,/typeof window==='undefined'\|\|typeof navigator==='undefined'/);
  assert.match(layer,/throw new Error\(NO_LOCK_MESSAGE\)/);
- assert.match(ui,/生成结果会自动保存到本机相册「我的生成」，可随时删除；上传的原照片不会被保存/);
- assert.match(ui,/已保存到相册「我的生成」，可随时删除/);
+ // The picture is stored by the server in the same transaction that consumes the
+ // quota, so a successful generation is always visible in the account.
+ assert.match(ui,/生成结果会保存到您的云端账户——在其它设备登录同一邮箱也能看到——并在本机保留一份缓存/);
+ assert.match(ui,/if\(failure\)\{generationSaved\.value=true;error\.value=`生成图片已显示，但/);
+ assert.match(ui,/cloudImages\.value=\[\{id:cloud,name,style:detail\.value\?\.id\|\|null,created,size:0\}/);
  assert.match(layer,/const GEN_KEY='hairplay\.generations\.v1'/);
  assert.match(layer,/export function storeGenerations/);
  assert.match(layer,/list\.every\(isGeneratedRecord\)/);
  assert.match(layer,/1080\/Math\.max\(img\.naturalWidth,img\.naturalHeight\)/);
- // Generated images are local-only: no server upload of results, no Service Worker caching.
- assert.doesNotMatch(layer,/CACHE_OPENED_IMAGES[\s\S]{0,400}generations/);
+ // The cloud link is the server id; a response without one is not guessed at.
+ assert.match(layer,/return \{image:result\.image,cloud:typeof result\.record\?\.id==='string'&&\/\^\[0-9a-f\]\{24\}\$\/\.test\(result\.record\.id\)\?result\.record\.id:''\}/);
+ assert.match(ui,/云端返回的图片编号缺失，已重新从账户同步相册/);
+ // Downloads keep their honest provenance in the file name.
  assert.match(layer,/a\.download=`HairPlay-AI-\$\{name\|\|'style'\}\.jpg`/);
+ assert.match(layer,/a\.download=`HairPlay-模板-\$\{name\}\.jpg`/);
+});
+
+test('templates are favourited, synced with the account and removable',()=>{
+ const ui=page(),layer=platform();
+ assert.match(ui,/async function toggleFavorite\(style:Style\)/);
+ assert.match(ui,/function isFavorite\(styleId:string\)/);
+ assert.match(ui,/class="outline wide" :disabled="loading" @click="toggleFavorite\(detail\)">\{\{isFavorite\(detail\.id\)\?'★ 已收藏这个模板':'☆ 收藏这个模板'\}\}/);
+ assert.match(ui,/async function syncFavoritesWithAccount\(\)/);
+ assert.match(ui,/const \{ids,initialized\}=await cloudFavorites\(\)/);
+ // A brand-new account adopts the local list; an existing account list wins.
+ assert.match(ui,/const wanted=initialized\?ids:state\.value\.favorites\.map\(f=>f\.styleId\)/);
+ assert.match(ui,/const saved=initialized\?ids:await cloudSaveFavorites\(wanted\)/);
+ assert.match(ui,/state\.value=\{\.\.\.state\.value,favorites:orderFavorites\(saved,state\.value\.favorites\)\}/);
+ assert.match(layer,/export async function cloudFavorites\(\)/);
+ assert.match(layer,/export async function cloudSaveFavorites\(ids:string\[\]\)/);
+ // Anonymous favourites still get the locked read-modify-write + read-back loop.
+ assert.match(ui,/async function updateFavorites\(mutate:\(list:SavedStyle\[\]\)=>SavedStyle\[\]\)/);
+ assert.match(ui,/return await withStorageLock\('hairai\.study\.v1',\(\)=>/);
+ assert.match(ui,/if\(sameStyleIds\(after\.favorites,next\)\)return \{ok:true,message:''\}/);
+ assert.match(ui,/另一个标签页同时改动了收藏，本次操作未生效，请重试/);
+ assert.match(ui,/const \{ok,message\}=await updateFavorites\(list=>on\?removeFavorites\(list,\[style\.id\]\):insertFavorite\(list,style\)\)/);
+ assert.match(ui,/最多收藏 \$\{FAVORITE_LIMIT\} 个模板，请先取消一个。/);
+ // The saved template screen never pretends the catalog example was generated.
+ assert.match(ui,/模板示例 · 目录图片，不是 AI 生成/);
+ assert.match(ui,/这是风格目录里的示例图，不是您照片的生成效果。/);
+ assert.match(ui,/function tryFavorite\(f:SavedStyle\)/);
 });
 
 test('AI records can be deleted from the gallery and from the detail screen',()=>{
  const ui=page();
- assert.match(ui,/await commitGenerations\(list=>removeGenerations\(list,ids\)\)/);
- assert.match(ui,/await commitRecords\(ids\)/);
- assert.match(ui,/withStorageLock\('hairai\.study\.v1'/);
- // A failed AI-area write must not delete templates and must say so.
- assert.match(ui,/本机相册删除未生效，模板示例记录未被删除/);
- // A failed template write after a successful AI delete is reported as partial.
- assert.match(ui,/AI 生成图片已删除，但模板示例记录未删除/);
+ assert.match(ui,/async function removeAlbumItems\(items:AlbumItem\[\]\)/);
+ // The account copy is deleted first: a failure there must keep the local copy too.
+ assert.match(ui,/for\(const id of cloudIds\)try\{await cloudDelete\(id\);\}catch\(e\)\{return \{ok:false,message:`云端删除未完成：/);
+ assert.match(ui,/const \{ok,message\}=await removeAlbumItems\(items\)/);
+ assert.match(ui,/图片已从账户删除，但本机缓存未能清除/);
  assert.match(ui,/function deleteGenerated\(\)/);
  assert.match(ui,/modal==='deleteGenerated'/);
- assert.match(ui,/AI 生成图片删除后无法恢复，也不会影响您的账户额度/);
+ assert.match(ui,/删除后无法恢复；不会退回已使用的生成额度/);
  assert.match(ui,/generatedDetail\.value=null/);
- assert.match(ui,/v-else-if="!galleryDetail&&!generatedDetail" class="tabs"/);
+ assert.match(ui,/v-else-if="!favoriteDetail&&!generatedDetail" class="tabs"/);
  // A second tab must re-read storage instead of overwriting it with a stale snapshot,
  // and a failed write must resync the UI from storage instead of faking success.
  assert.match(ui,/window\.addEventListener\('storage',syncLocalStores\)/);
  assert.match(ui,/function syncLocalStores\(\)\{generations\.value=loadGenerations\(\);state\.value=loadState\(\)/);
- assert.match(ui,/if\(ids\.every\(id=>!after\.records\.some\(r=>r\.id===id\)\)\)return \{ok:true,message:''\}/);
- assert.match(ui,/if\(!removed\.ok\)\{closeModal\(\);error\.value=`本机相册删除未生效，模板示例记录未被删除/);
  assert.match(ui,/if\(!ok\)\{error\.value=message;return;\}/);
- assert.match(ui,/尚未保存到本机相册，请先点击「下载这张」/);
+ assert.match(ui,/尚未保存，请先点击「下载这张」。/);
  assert.match(ui,/@click="downloadLive\(\)">下载这张/);
 });
 

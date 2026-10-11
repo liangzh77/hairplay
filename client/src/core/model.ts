@@ -8,15 +8,32 @@ export function heroStyleFor(gender:Gender|undefined):Style{
  const style=catalog.find(s=>s.id===id);if(!style)throw new Error('缺少首页示例发型');return style;
 }
 export function filterStyles(category:string,query:string){const q=query.trim().toLowerCase();return catalog.filter(s=>(category==='所有风格'||s.group===category)&&`${s.name} ${s.category}`.toLowerCase().includes(q));}
-export interface DemoRecord {id:string;name:string;image:string;created:string;demo:true;beforeLabel:string}
-export const RECORD_LIMIT=50;
-export interface State {version:1;bannerHidden:boolean;rememberOptions:boolean;options:Record<string,string>;records:DemoRecord[]}
-export const initialState=():State=>({version:1,bannerHidden:false,rememberOptions:true,options:{},records:[]});
+// A saved style is a catalogue entry the user kept. It is a copy of the public
+// catalogue metadata plus the catalogue image path, so the gallery can render it
+// without a network round-trip, and it is synced with the account (the account
+// list is authoritative once it exists).
+export interface SavedStyle {id:string;styleId:string;name:string;image:string;created:string}
+export const FAVORITE_LIMIT=50;
+export interface State {version:1;bannerHidden:boolean;rememberOptions:boolean;options:Record<string,string>;favorites:SavedStyle[]}
+export const initialState=():State=>({version:1,bannerHidden:false,rememberOptions:true,options:{},favorites:[]});
+function mergeFavorites(preferred:unknown,legacy:unknown):SavedStyle[]{
+ const out:SavedStyle[]=[];
+ for(const source of [preferred,legacy])if(Array.isArray(source))for(const r of source){const saved=normalizeSavedStyle(r);if(saved&&!out.some(x=>x.styleId===saved.styleId))out.push(saved);}
+ return out.slice(0,FAVORITE_LIMIT);
+}
+function normalizeSavedStyle(value:unknown):SavedStyle|null{
+ const r=value as any;if(!r||typeof r!=='object')return null;
+ // Records written before favourites existed were catalogue examples, so they
+ // migrate by image path instead of being thrown away.
+ const style=catalog.find(s=>s.id===r.styleId)||catalog.find(s=>s.image===r.image);
+ if(!style||typeof r.name!=='string'||r.name.length<1||r.name.length>60||typeof r.created!=='string')return null;
+ return {id:`fav-${style.id}`,styleId:style.id,name:r.name,image:style.image,created:r.created};
+}
 export function decodeState(value:unknown):State{
  try{const v=typeof value==='string'?JSON.parse(value):value;if(!v||v.version!==1)return initialState();
  const safe=initialState();safe.bannerHidden=v.bannerHidden===true;safe.rememberOptions=v.rememberOptions!==false;
  if(v.options&&typeof v.options==='object') for(const k of ['风格类型','护理程度','偏好长度','发色偏好'])if(typeof v.options[k]==='string'&&v.options[k].length<30)safe.options[k]=v.options[k];
- if(Array.isArray(v.records))safe.records=v.records.filter((r:any)=>r&&r.demo===true&&typeof r.id==='string'&&typeof r.name==='string'&&r.name.length<100&&catalog.some(s=>s.image===r.image)&&typeof r.created==='string'&&typeof r.beforeLabel==='string').slice(0,RECORD_LIMIT);
+ safe.favorites=mergeFavorites(v.favorites,v.records);
  return safe;}catch{return initialState();}
 }
 export interface PhotoMeta {size:number;type:string;width?:number;height?:number}
@@ -25,20 +42,24 @@ export function validatePhoto(p:PhotoMeta):string{
  if(p.size<=0)return '文件为空或已损坏';if(p.size>8*1024*1024)return '图片不得超过 8 MB';
  if(p.width!==undefined&&p.height!==undefined&&(p.width<32||p.height<32||p.width*p.height>24_000_000))return '图片尺寸需至少 32×32，且不超过 2400 万像素';return '';
 }
-export interface GenerationRequest {photo:string;styleId?:string;options:Record<string,string>;requirements:string;demo:boolean}
-export interface GenerationResult {demo:true;style:Style}
-export interface GenerationService {generate(request:GenerationRequest):Promise<GenerationResult>}
-export class LocalGenerationService implements GenerationService{
- async generate(r:GenerationRequest):Promise<GenerationResult>{if(!r.photo)throw new Error('请先上传您的照片');if(!r.demo)throw new Error('AI 服务未配置。照片未上传，请配置服务后重试，或显式选择演示模式。');
- const style=catalog.find(s=>s.id===r.styleId)||catalog.find(s=>s.id==='catalog-53-1')!;return {demo:true,style};}
+export function makeSavedStyle(style:Style):SavedStyle{return {id:`fav-${style.id}`,styleId:style.id,name:style.name,image:style.image,created:new Date().toISOString()};}
+export function isSavedStyle(value:unknown):value is SavedStyle{
+ const r=value as SavedStyle|undefined;
+ if(!r||typeof r!=='object')return false;
+ const style=catalog.find(s=>s.id===r.styleId);
+ return !!style&&r.id===`fav-${style.id}`&&r.image===style.image&&typeof r.name==='string'&&r.name.length>0&&r.name.length<=60&&typeof r.created==='string';}
+export function decodeFavorites(value:unknown):SavedStyle[]{
+ try{const v=typeof value==='string'?JSON.parse(value):value;if(!Array.isArray(v))return [];return mergeFavorites(v,null);}catch{return [];}
 }
-export function makeRecord(result:GenerationResult):DemoRecord{return {id:`demo-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,name:result.style.name,image:result.style.image,created:new Date().toISOString(),demo:true,beforeLabel:'目录示例对比，非用户照片生成'};}
-export function removeRecords(state:State,ids:string[]){return {...state,records:state.records.filter(r=>!ids.includes(r.id))};}
-// AI results live in their own local-only list: the device keeps a downscaled
-// copy of the generated picture, never the uploaded photo, and never on a server.
+export function insertFavorite(list:SavedStyle[],style:Style){return [makeSavedStyle(style),...list.filter(r=>r.styleId!==style.id)].slice(0,FAVORITE_LIMIT);}
+export function removeFavorites(list:SavedStyle[],styleIds:string[]){return list.filter(r=>!styleIds.includes(r.styleId));}
+// AI results live in their own list: the account keeps the 2K original on the
+// server, while this device keeps a downscaled copy as a cache, so the gallery
+// still renders offline and after the localStorage cache is cleared.
 export const GENERATION_LIMIT=6;
 export const GENERATION_IMAGE_MAX=2_200_000;
-export interface GeneratedRecord {id:string;name:string;image:string;created:string;source:'ai'}
+export interface GeneratedRecord {id:string;name:string;image:string;created:string;source:'ai';cloud?:string}
+const CLOUD_ID=/^[0-9a-f]{24}$/;
 const B64='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 function b64Group(group:string):number[]{const v=[0,1,2,3].map(i=>B64.indexOf(group[i]));return [(v[0]<<2)|(v[1]>>4),((v[1]&15)<<4)|(v[2]>>2),((v[2]&3)<<6)|v[3]];}
 // A stored picture is only trusted when it is structurally a JPEG: the SOI
@@ -81,12 +102,21 @@ export function isValidGeneratedImage(image:unknown):image is string{
  return jpegEndsWithEoi(image.slice('data:image/jpeg;base64,'.length));}
 export function isGeneratedRecord(value:unknown):value is GeneratedRecord{
  const r=value as GeneratedRecord|undefined;
- return !!r&&typeof r==='object'&&r.source==='ai'&&typeof r.id==='string'&&r.id.startsWith('gen-')&&typeof r.name==='string'&&r.name.length>0&&r.name.length<=60&&typeof r.created==='string'&&isValidGeneratedImage(r.image);}
-export function makeGeneratedRecord(name:string,image:string):GeneratedRecord{
- return {id:`gen-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,name:name.slice(0,60)||'AI 发型',image,created:new Date().toISOString(),source:'ai'};}
+ return !!r&&typeof r==='object'&&r.source==='ai'&&typeof r.id==='string'&&r.id.startsWith('gen-')&&typeof r.name==='string'&&r.name.length>0&&r.name.length<=60&&typeof r.created==='string'&&(r.cloud===undefined||CLOUD_ID.test(r.cloud))&&isValidGeneratedImage(r.image);}
+// A stored pointer to a cloud copy that is not a server id is dropped instead of
+// invalidating the whole record: the cached picture is still a picture the user
+// generated, so it stays visible as a local-only result.
+export function sanitizeGeneratedRecord(value:unknown):GeneratedRecord|null{
+ if(!value||typeof value!=='object')return null;
+ const {cloud,...rest}=value as GeneratedRecord;
+ if(!isGeneratedRecord({...rest,cloud:undefined}))return null;
+ return cloud!==undefined&&CLOUD_ID.test(cloud)?{...rest,cloud}:rest as GeneratedRecord;}
+export function makeGeneratedRecord(name:string,image:string,cloud?:string):GeneratedRecord{
+ const record:GeneratedRecord={id:`gen-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,name:name.slice(0,60)||'AI 发型',image,created:new Date().toISOString(),source:'ai'};
+ return cloud&&CLOUD_ID.test(cloud)?{...record,cloud}:record;}
 export function decodeGenerations(value:unknown):GeneratedRecord[]{
  try{const v=typeof value==='string'?JSON.parse(value):value;if(!Array.isArray(v))return [];
-  return v.filter(isGeneratedRecord).slice(0,GENERATION_LIMIT);}catch{return [];}
+  return v.map(sanitizeGeneratedRecord).filter((r):r is GeneratedRecord=>!!r).slice(0,GENERATION_LIMIT);}catch{return [];}
 }
 export function insertGeneration(list:GeneratedRecord[],record:GeneratedRecord){return [record,...list.filter(r=>r.id!==record.id)].slice(0,GENERATION_LIMIT);}
 export function removeGenerations(list:GeneratedRecord[],ids:string[]){return list.filter(r=>!ids.includes(r.id));}

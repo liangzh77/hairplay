@@ -1,9 +1,9 @@
-import {decodeState,decodeGenerations,isGeneratedRecord,GENERATION_LIMIT,type State,type Gender,type GeneratedRecord,validatePhoto} from '../core/model';
+import {decodeState,decodeGenerations,isGeneratedRecord,isSavedStyle,FAVORITE_LIMIT,GENERATION_LIMIT,type State,type Gender,type GeneratedRecord,type SavedStyle,validatePhoto} from '../core/model';
 export type {Gender} from '../core/model';
 import {assetUrl} from '../core/assets';
 const KEY='hairai.study.v1';
 export function loadState(){try{return decodeState(uni.getStorageSync(KEY));}catch{return decodeState(null);}}
-export function storeState(s:State){try{uni.setStorageSync(KEY,JSON.stringify(s));return '';}catch{return '本地存储空间不足，记录未保存。请删除旧演示记录后重试。';}}
+export function storeState(s:State){try{uni.setStorageSync(KEY,JSON.stringify(s));return '';}catch{return '本地存储空间不足，记录未保存。请删除旧收藏或生成记录后重试。';}}
 const GEN_KEY='hairplay.generations.v1';
 export function loadGenerations():GeneratedRecord[]{try{return decodeGenerations(uni.getStorageSync(GEN_KEY));}catch{return [];}}
 export function storeGenerations(list:GeneratedRecord[]){
@@ -96,15 +96,64 @@ export async function downloadGenerated(image:string,name:string):Promise<string
  return '此端暂无导出功能';
 }
 export interface Account {email:string;gender:Gender;remaining:number}
-export async function accountApi(path:string,body?:Record<string,string|null>):Promise<{account?:Account|null}>{
+// One place decides how a failed API call is reported. The wording must never
+// claim success or blame the user's input for a network/authentication problem:
+// every caller turns these strings into an on-screen failure notice.
+function apiBase(){return import.meta.env.BASE_URL+'api/';}
+async function apiRequest(path:string,init:RequestInit={}):Promise<any>{
  // #ifdef H5
- let r:Response;try{r=await fetch(import.meta.env.BASE_URL+'api/'+path,{credentials:'same-origin',cache:'no-store',...(body?{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}:{})});}catch{throw Error('邮箱登录服务未启动；公网目前仅静态演示');}
- if(r.status===404)throw Error('邮箱登录服务未部署；公网目前仅静态演示');
- const data=await r.json().catch(()=>({error:'服务返回异常'}));if(!r.ok)throw Error(data.error||'登录服务异常');return data;
+ let response:Response;try{response=await fetch(apiBase()+path,{credentials:'same-origin',cache:'no-store',...init});}
+ catch{throw Error('无法连接有型服务，请检查网络后重试');}
+ const data=await response.json().catch(()=>({error:'服务返回异常'}));
+ if(!response.ok)throw Error(typeof data.error==='string'&&data.error?data.error:response.status===401?'登录状态已失效，请重新登录':'服务暂不可用，请稍后重试');
+ return data;
  // #endif
+ // #ifdef MP-WEIXIN
+ throw Error('小程序端账户服务尚未接入');
+ // #endif
+}
+const jsonPost=(body:unknown):RequestInit=>({method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+export async function accountApi(path:string,body?:Record<string,string|null>):Promise<{account?:Account|null}>{
  // #ifdef MP-WEIXIN
  throw Error('小程序邮箱登录与真实生成尚未接入');
  // #endif
+ return apiRequest(path,body?jsonPost(body):{});
+}
+export interface CloudImage {id:string;name:string;style:string|null;created:string;size:number}
+// The cloud album is the authoritative list for a signed-in account: the local
+// records are only a cache, so every sync and every deletion asks the server.
+export async function cloudAlbum():Promise<CloudImage[]>{
+ const data=await apiRequest('gallery');
+ if(!Array.isArray(data?.images))throw Error('云端相册返回异常，请稍后重试');
+ return data.images.filter((r:any)=>r&&typeof r.id==='string'&&/^[0-9a-f]{24}$/.test(r.id)).map((r:any)=>({id:r.id,name:typeof r.name==='string'?r.name:'AI 发型',style:typeof r.style==='string'?r.style:null,created:typeof r.created==='string'?r.created:new Date().toISOString(),size:Number(r.size)||0}));
+}
+export async function cloudImageData(id:string):Promise<string>{
+ // #ifdef H5
+ let response:Response;try{response=await fetch(apiBase()+'gallery/'+id,{credentials:'same-origin',cache:'no-store'});}catch{throw Error('无法连接有型服务，请检查网络后重试');}
+ if(!response.ok)throw Error(response.status===404?'这张图片已不在云端账户中':'云端图片读取失败，请稍后重试');
+ const blob=await response.blob();
+ if(blob.size<1_024||blob.size>4*1024*1024||blob.type&&!blob.type.startsWith('image/jpeg'))throw Error('云端图片格式无效');
+ return await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(Error('云端图片读取失败'));reader.readAsDataURL(blob);});
+ // #endif
+ throw Error('小程序端账户服务尚未接入');
+}
+export async function cloudDelete(id:string):Promise<boolean>{
+ const data=await apiRequest('gallery/delete',jsonPost({id}));
+ return data?.deleted===true;
+}
+export async function cloudImport(image:string,name:string,styleId?:string):Promise<{id:string;created:string}>{
+ const data=await apiRequest('gallery/import',jsonPost({image,name,style:styleId}));
+ if(typeof data?.id!=='string'||!/^[0-9a-f]{24}$/.test(data.id))throw Error('云端相册返回异常，请稍后重试');
+ return {id:data.id,created:typeof data.created==='string'?data.created:new Date().toISOString()};
+}
+export async function cloudFavorites():Promise<{ids:string[];initialized:boolean}>{
+ const data=await apiRequest('favorites');
+ const ids=Array.isArray(data?.ids)?data.ids.filter((id:unknown)=>typeof id==='string'):[];
+ return {ids,initialized:data?.initialized===true};
+}
+export async function cloudSaveFavorites(ids:string[]):Promise<string[]>{
+ const data=await apiRequest('favorites',jsonPost({ids}));
+ return Array.isArray(data?.ids)?data.ids.filter((id:unknown)=>typeof id==='string'):[];
 }
 export function setupImageCache():()=>void{
  // #ifdef H5
@@ -148,7 +197,7 @@ export async function pickPhoto(onReading?:()=>void):Promise<Photo|null>{
  return new Promise((resolve,reject)=>uni.chooseImage({count:1,sizeType:['original'],sourceType:['album','camera'],success:async(res)=>{onReading?.();try{const f=(res.tempFiles as UniApp.ChooseImageSuccessCallbackResultFile[])[0];const path=res.tempFilePaths[0];const ext=path.split('.').pop()?.toLowerCase();const type=ext==='png'?'image/png':ext==='webp'?'image/webp':ext==='jpg'||ext==='jpeg'?'image/jpeg':'';const info=await uni.getImageInfo({src:path});const error=validatePhoto({size:f.size,type,width:info.width,height:info.height});if(error)throw new Error(error);resolve({url:path,width:info.width,height:info.height});}catch(e){reject(e);}},fail:(e)=>e.errMsg.includes('cancel')?resolve(null):reject(new Error('无法读取照片，请重试'))}));
  // #endif
 }
-export async function generateLiveImage(photo:Photo,styleId:string,requirements:string):Promise<string>{
+export async function generateLiveImage(photo:Photo,styleId:string,requirements:string):Promise<{image:string;cloud:string}>{
  // #ifdef H5
  // The file picker MIME may be wrong (e.g. HEIC/PNG bytes named .jpg). The image
  // has already been decoded for preview; re-encode those pixels as real JPEG.
@@ -170,7 +219,10 @@ export async function generateLiveImage(photo:Photo,styleId:string,requirements:
  const result=await response.json().catch(()=>({error:'服务返回异常'}));
  if(!response.ok)throw new Error(typeof result.error==='string'?result.error:'AI 生成失败');
  if(typeof result.image!=='string'||!result.image.startsWith('data:image/jpeg;base64,'))throw new Error('生成图片无效');
- return result.image;
+ // The account id is what makes the picture visible on another device. A server
+ // that stored the picture but returned no id leaves the caller to re-read the
+ // account list instead of inventing a link it cannot verify.
+ return {image:result.image,cloud:typeof result.record?.id==='string'&&/^[0-9a-f]{24}$/.test(result.record.id)?result.record.id:''};
  // #endif
  // #ifdef MP-WEIXIN
  throw new Error('小程序端真实 AI 服务尚未接入；照片没有上传');
@@ -221,7 +273,7 @@ export function backLocalHistory(){
  window.history.back();return;
  // #endif
 }
-export async function downloadDemo(url:string,name:string):Promise<string>{
+export async function downloadStyle(url:string,name:string):Promise<string>{
  // #ifdef H5
  const href=assetUrl(url);let objectUrl='';
  // Browser downloads can bypass Service Worker fetch handlers. Use only the
@@ -234,9 +286,27 @@ export async function downloadDemo(url:string,name:string):Promise<string>{
    }
   }
  }}catch{/* storage disabled: download from the public URL instead */}
- const a=document.createElement('a');a.href=objectUrl||href;a.download=`HairPlay-DEMO-${name}.jpg`;document.body.appendChild(a);a.click();a.remove();
+ const a=document.createElement('a');a.href=objectUrl||href;a.download=`HairPlay-模板-${name}.jpg`;document.body.appendChild(a);a.click();a.remove();
  if(objectUrl)setTimeout(()=>URL.revokeObjectURL(objectUrl),60_000);
- return '已下载目录演示图（非 AI 生成）';
+ return '已下载目录图片（非 AI 生成）';
+ // #endif
+ // #ifdef MP-WEIXIN
+ uni.showToast({title:'小程序请使用图片预览；保存相册尚待真机验证',icon:'none'});
+ // #endif
+ return '此端暂无导出功能';
+}
+// Download the untouched 2K original from the account, not the downscaled local
+// copy. Same-origin with the session cookie, so the anchor download works.
+export async function downloadCloudImage(id:string,name:string):Promise<string>{
+ // #ifdef H5
+ let response:Response;try{response=await fetch(apiBase()+'gallery/'+id,{credentials:'same-origin'});}catch{throw Error('无法连接有型服务，请检查网络后重试');}
+ if(!response.ok)throw Error(response.status===404?'这张图片已不在云端账户中':'云端原图下载失败，请稍后重试');
+ const blob=await response.blob();
+ if(blob.size<1_024||blob.size>4*1024*1024)throw Error('云端原图大小异常，已取消下载');
+ const objectUrl=URL.createObjectURL(blob);
+ const a=document.createElement('a');a.href=objectUrl;a.download=`HairPlay-AI-${name||'style'}.jpg`;document.body.appendChild(a);a.click();a.remove();
+ setTimeout(()=>URL.revokeObjectURL(objectUrl),60_000);
+ return '已下载云端原图';
  // #endif
  // #ifdef MP-WEIXIN
  uni.showToast({title:'小程序请使用图片预览；保存相册尚待真机验证',icon:'none'});

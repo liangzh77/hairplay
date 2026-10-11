@@ -1,1 +1,1 @@
-{"name":"有型（HairPlay）","appid":"","description":"HairPlay static hairstyle demo; no photo transformation service","versionName":"0.1.0","versionCode":"1","h5":{"router":{"mode":"hash"}},"mp-weixin":{"appid":"","setting":{"urlCheck":true},"usingComponents":true}}
+{"name":"有型（HairPlay）","appid":"","description":"有型（HairPlay）AI 发型试戴；生成结果保存在云端账户，本机保留一份缓存","versionName":"0.1.0","versionCode":"1","h5":{"router":{"mode":"hash"}},"mp-weixin":{"appid":"","setting":{"urlCheck":true},"usingComponents":true}}

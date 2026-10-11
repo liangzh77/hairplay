@@ -5,6 +5,15 @@ import {randomBytes,randomInt,createHmac,timingSafeEqual} from 'node:crypto';
 export const normalizeEmail=v=>typeof v==='string'?v.trim().toLowerCase():'';
 export const validEmail=email=>typeof email==='string'&&email.length<=254&&/^[a-z0-9.!#$%&'*+\/?=^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,63}$/.test(email);
 export const validGender=gender=>gender===null||gender==='male'||gender==='female';
+// Cloud copies of generated pictures. The lifetime generation quota already caps
+// generated images at 3 per account; this cap bounds the import path (pictures a
+// user generated before the cloud copy existed, or on another device offline).
+export const GALLERY_LIMIT=3;
+export const GALLERY_MAX_BYTES=4*1024*1024;
+// Style ids the client may favourite; anything else is refused, so a stolen
+// session cannot turn the account row into arbitrary storage.
+export const validStyleId=id=>typeof id==='string'&&/^[a-z0-9-]{1,40}$/.test(id);
+export const FAVORITE_LIMIT=50;
 export class AuthStore{
  constructor(path,{now=Date.now}={}){
   if(!path||path===':memory:')throw Error('Persistent database required');
@@ -21,6 +30,9 @@ export class AuthStore{
    CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY,user INTEGER NOT NULL,expires INTEGER NOT NULL);
    CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,user INTEGER NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL);
    CREATE INDEX IF NOT EXISTS jobs_user ON jobs(user,state);
+   CREATE TABLE IF NOT EXISTS gallery(id TEXT PRIMARY KEY,user INTEGER NOT NULL,name TEXT NOT NULL,style TEXT,created INTEGER NOT NULL,size INTEGER NOT NULL,bytes BLOB NOT NULL);
+   CREATE INDEX IF NOT EXISTS gallery_user ON gallery(user,created);
+   CREATE TABLE IF NOT EXISTS favorites(user INTEGER PRIMARY KEY,ids TEXT NOT NULL,updated INTEGER NOT NULL);
   `);
   // Serialize check + migration across processes; legacy rows keep gender NULL.
   this.db.exec('BEGIN IMMEDIATE');
@@ -74,5 +86,34 @@ export class AuthStore{
   if(this.db.prepare("SELECT count(*) n FROM jobs WHERE state='pending' OR created>?").get(this.now()-3600000).n>=3||this.db.prepare("SELECT count(*) n FROM jobs WHERE state='pending'").get().n>0)throw Object.assign(Error('生成繁忙或达到每小时服务预算'),{status:429});
   const id=randomBytes(16).toString('hex');this.db.prepare("INSERT INTO jobs VALUES(?,?,'pending',?)").run(id,user,this.now());return id;});}
  finish(id,ok){this.db.prepare("UPDATE jobs SET state=? WHERE id=? AND state='pending'").run(ok?'success':'failed',id);}
+ // The stored picture and the consumed quota are one commit: a successful
+ // generation is never charged without its cloud copy, and a rolled back insert
+ // (bad bytes, full disk) leaves the job pending so `finish(id,false)` refunds it.
+ // `limit` is 0 for the generation path (the lifetime quota already bounds it).
+ #addImage(user,meta,bytes,limit){
+  if(!Buffer.isBuffer(bytes)||bytes.length<1024||bytes.length>GALLERY_MAX_BYTES)throw Object.assign(Error('图片大小无效'),{status:400});
+  if(limit&&this.db.prepare('SELECT count(*) n FROM gallery WHERE user=?').get(user).n>=limit)throw Object.assign(Error('云端相册最多保存 '+limit+' 张，请先删除一张'),{status:429});
+  const id=randomBytes(12).toString('hex'),created=this.now();
+  this.db.prepare('INSERT INTO gallery VALUES(?,?,?,?,?,?,?)').run(id,user,String(meta?.name||'AI 发型').slice(0,60)||'AI 发型',validStyleId(meta?.style)?meta.style:null,created,bytes.length,bytes);
+  return {id,created};
+ }
+ finishWithImage(id,meta,bytes){return this.tx(()=>{
+  const row=this.db.prepare("SELECT user FROM jobs WHERE id=? AND state='pending'").get(id);
+  if(!row)return null;
+  this.db.prepare("UPDATE jobs SET state='success' WHERE id=? AND state='pending'").run(id);
+  return this.#addImage(row.user,meta,bytes,0);});}
+ addImage(user,meta,bytes){return this.tx(()=>this.#addImage(user,meta,bytes,GALLERY_LIMIT));}
+ // Newest first; picture ids are random, so the rowid (insertion order) is the
+ // tie-break: two pictures added in the same millisecond must not swap order
+ // between reloads.
+ listImages(user){return this.db.prepare('SELECT id,name,style,created,size FROM gallery WHERE user=? ORDER BY created DESC,rowid DESC').all(user);}
+ image(user,id){return this.db.prepare('SELECT name,style,created,size,bytes FROM gallery WHERE id=? AND user=?').get(id,user)||null;}
+ deleteImage(user,id){return this.db.prepare('DELETE FROM gallery WHERE id=? AND user=?').run(id,user).changes>0;}
+ countImages(user){return this.db.prepare('SELECT count(*) n FROM gallery WHERE user=?').get(user).n;}
+ // `null` means the account never stored favourites (first sync adopts the local
+ // list); `[]` means the account deliberately has none, so the empty list wins.
+ favorites(user){const row=this.db.prepare('SELECT ids FROM favorites WHERE user=?').get(user);if(!row)return null;
+  try{const ids=JSON.parse(row.ids);return Array.isArray(ids)?ids.filter(validStyleId).slice(0,FAVORITE_LIMIT):[];}catch{return [];}}
+ setFavorites(user,ids){this.db.prepare('INSERT INTO favorites VALUES(?,?,?) ON CONFLICT(user) DO UPDATE SET ids=excluded.ids,updated=excluded.updated').run(user,JSON.stringify(ids),this.now());}
  close(){this.db.close();}
 }

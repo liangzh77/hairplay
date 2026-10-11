@@ -1,6 +1,6 @@
 # 有型（HairPlay）发布
 
-公开地址：<https://liangz77.cn/hairplay/>。静态 H5 前端 + 独立服务端邮箱验证码登录（最多 100 个验证用户）和 Ark 图生图（每人终身最多 3 张成功图，失败不扣）；演示模式不上传照片。无支付。小程序仅做编译检查，邮箱登录/真实生成尚未接入且未真机验收。
+公开地址：<https://liangz77.cn/hairplay/>。静态 H5 前端 + 独立服务端邮箱验证码登录（最多 100 个验证用户）和 Ark 图生图（每人终身最多 3 张成功图，失败不扣）；上传时只把照片发送一次、原照片不落盘不入库，生成结果保存在云端账户并在本机保留一份缓存（删除会同时删除云端副本），收藏的模板在登录后与账户同步，未登录时两者都只保存在本机浏览器。无支付。小程序仅做编译检查，邮箱登录/真实生成尚未接入且未真机验收。
 
 ## 本地构建检查
 
@@ -15,7 +15,32 @@ npm --workspace client run build:mp-weixin
 
 `build:public` 使用 `/hairplay/` 作为资源前缀。`client/scripts/check-public-build.mjs` 对静态资源执行 SHA-256 白名单校验，移除 uni-app 从本机复制的**已知名称**研究图，并对未知静态文件、macOS `._*` 元数据和 source map 拒绝发布、删除不合格产物。请勿将 `hairai-study/`、原始截图、`catalog-*.jpg` 或 `dracula.jpg` 手动复制到产物中；建议在 Git 干净导出的目录重建。
 
-打包用 `bash scripts/package-release.sh client/dist/build/h5 /tmp/全新输出目录`，得到 `release.tgz` 与逐文件 SHA-256 `manifest.json`；此脚本只做本地校验打包，**不执行部署**。`scripts/release.py` 会拒绝多余文件、macOS AppleDouble、符号链接、路径穿越和未经批准的元数据；不要用 macOS `tar -czf` 代替（它可能添加 `._*` 资源叉，先前线上 51 个此类文件已清理）。Linux 服务器上的 `scripts/release-remote.sh` 支持按版本清单验证、原子 `mv -T` 切换及失败回滚；使用前检查路径、发布清单、Caddy 配置及相关参数。`python3 scripts/test_release.py` 与 Linux 上的 `python3 scripts/test_atomic_switch.py` 可复验打包和切换逻辑。
+打包用 `bash scripts/package-release.sh client/dist/build/h5 /tmp/全新输出目录`，得到 `release.tgz` 与逐文件 SHA-256 `manifest.json`；此脚本只做本地校验打包，**不执行部署**。`scripts/release.py` 会拒绝多余文件、macOS AppleDouble、符号链接、路径穿越和未经批准的元数据；不要用 macOS `tar -czf` 代替（它可能添加 `._*` 资源叉，先前线上 51 个此类文件已清理）。Linux 服务器上的 `scripts/release-remote.sh` 支持按版本清单验证、原子 `mv -T` 切换及失败回滚；使用前检查路径、发布清单、Caddy 配置及相关参数。`python3 scripts/test_release.py` 与 Linux 上的 `python3 scripts/test_atomic_switch.py` 可复验打包和切换逻辑。`scripts/release.py` 的 `--kind static|api` 覆盖两种发布物：静态用 `pack`/`verify-archive`/`verify-http`，API 用 `pack-api`/`verify-api-release`（见下节）。
+
+## API 发布（`scripts/deploy-api.sh` + `scripts/release-api-remote.sh`）
+
+后端不是纯静态文件：发布树里除代码外还有依赖 `node_modules/`、软链接 `.data -> /var/lib/hairplay`（额度/相册 SQLite）和 `.secrets -> /etc/hairplay`（SMTP/Ark 凭据）。所以 API 走独立发布通道；**发布包只含已提交的后端源码**，绝不包含依赖、数据库或密钥（`manifest(...,'api')` 会拒绝 `node_modules/`、`.data/`、`.secrets/`、`.git/`、`*.sqlite*|*.env|*.log|*.pem|*.key` 与未知路径）。
+
+本地（macOS，需要干净的 `server/`、`client/src/`、`package.json`、`package-lock.json`）：
+
+```sh
+scripts/deploy-api.sh <版本号> [switch]   # 版本号形如 20261011T012345Z；switch 只切换已存在的版本
+```
+
+它用 `git archive HEAD server client/src package.json package-lock.json` 取**已提交**树（后端有未提交改动会直接拒绝发布），本地跑 `python3 scripts/release.py pack-api` 生成 `release.tgz` + 逐文件 SHA-256 清单并 `verify-archive --kind api` 自查，把包上传到远端 `/tmp/hairplay-api-deploy-<id>`，再对比本地与远端的 `release.py`／`release-api-remote.sh` SHA-256；两者不一致就拒绝发布（远端执行的是远端那份检查器，必须逐字节相同），一致才调用远端脚本。
+
+远端 `/opt/hairplay` 布局：`releases/<id>/`（`server/`、`client/src/`、`package.json`、`package-lock.json`、`node_modules/`，以及 `.data`/`.secrets` 两条软链接）、`current -> releases/<id>`、`.publish.lock`。`scripts/release-api-remote.sh deploy <id> <manifest> <checker> <archive>` 的顺序：
+
+1. `flock -n .publish.lock`（并发发布直接失败），`verify-archive --kind api` 校验发布包；已存在的版本目录拒绝覆盖。
+2. 逐成员复制到 `releases/.staging-<id>.XXXX`（**不用 `tar extractall`**），`verify-tree --kind api` 校验，然后目录 755、文件 644。
+3. 链接 `.data`/`.secrets`；`package-lock.json` 与上一版逐字节相同则 `cp -a` 复用旧 `node_modules`，否则 `npm ci --omit=dev --no-audit --no-fund`。
+4. 切换前冒烟：`node -e "import('./server/ark.mjs')"` 必须导出 `createApp` 且无副作用。
+5. 仅 root 可读的数据库备份 `sqlite3 /var/lib/hairplay/auth.sqlite ".backup '/var/lib/hairplay/backups/auth-before-api-<id>.sqlite'"`（0600 root:root）。
+6. 原子 `mv -Tf` 切换 `current`，`systemctl restart hairplay-api.service`，再探活 20×1 s：`curl http://127.0.0.1:8777/hairplay/api/session` 必须**恰好**返回 `{"account":null}`，且 `SELECT count(*) FROM users` 与切换前一致（证明共享的账号/额度账本没被发布动作扰动）。任何一步失败即切回旧版本、重启、重新探活，并打印 `API_PUBLISH_ROLLED_BACK current=…`。
+
+`switch <id> <manifest> <checker>` 只做「校验目标发布树 → 原子切换 → 重启 → 探活」，用于回滚。旧版本目录和失败目录都保留（失败时给出路径便于排查），**同一版本号不能重复发布**，重发必须换新 id。`HAIRPLAY_API_ROOT|DATA|SECRETS|RESTART|HEALTH` 只用于隔离演练（`python3 scripts/test_api_remote_publish.py`，Linux 上跑，含 happy/覆盖拒绝/健康失败回滚/篡改拒绝等用例），**禁止在生产主机上设置**。
+
+`/hairplay/api/*` 之外没有 `/health` 路由（直接访问 404），线上健康检查只认 `/hairplay/api/session`。发布顺序固定为**先 API、后静态**：旧前端会忽略新增的响应字段，而新前端依赖新的 `POST /api/gallery/*`，先发 API 才不会出现 404 窗口。
 
 ## 服务器位置与路由
 

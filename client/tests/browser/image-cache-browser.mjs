@@ -59,10 +59,10 @@ try{
  await other.goto(`${url}`,{waitUntil:'networkidle'});
  await other.evaluate(url=>new Promise((resolve,reject)=>{const img=new Image();img.onload=resolve;img.onerror=reject;img.src=url;document.body.append(img)}),target);
  assert.equal(count.get(pathTarget),before,'cached image refetched over network');assert.ok(hit,'Second page image should be served by worker');
- await other.evaluate(()=>localStorage.setItem('hairai.study.v1',JSON.stringify({version:1,bannerHidden:false,rememberOptions:true,options:{},records:[{id:'demo-cache',name:'班图结',image:'/static/catalog/ai-catalog-55-1.jpg',created:'2026-10-10T00:00:00.000Z',demo:true,beforeLabel:'示例'}]})));
+ await other.evaluate(()=>localStorage.setItem('hairai.study.v1',JSON.stringify({version:1,bannerHidden:false,rememberOptions:true,options:{},records:[{id:'legacy-cache',name:'班图结',image:'/static/catalog/ai-catalog-55-1.jpg',created:'2026-10-10T00:00:00.000Z'}]})));
  await other.reload({waitUntil:'networkidle'});await other.locator('.tabs uni-button[aria-label="导航 画廊"]').click();
- await other.locator('uni-button[aria-label="模板示例 班图结"]').click();
- const download=other.waitForEvent('download');await other.locator('uni-button').filter({hasText:'下载演示图片'}).click();await download;
+ await other.locator('uni-button[aria-label="收藏的模板 班图结"]').click();
+ const download=other.waitForEvent('download');await other.locator('uni-button').filter({hasText:'下载模板图片'}).click();await download;
  assert.equal(count.get(pathTarget),before,'gallery download of an opened public image should use CacheStorage');
  // A rollback uses the reset worker at the same URL to delete CacheStorage and unregister.
  resetMode=true;await other.close();await p.evaluate(async()=>{const reg=await navigator.serviceWorker.getRegistration('/hairplay/');await reg.update()});

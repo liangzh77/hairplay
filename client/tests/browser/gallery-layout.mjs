@@ -29,7 +29,7 @@ try{
   assert.match(dom.tabs,/画廊/);
   assert.equal(dom.sections.length,2);
   assert.match(dom.sections[0],/我的生成\s+01/);
-  assert.match(dom.sections[1],/模板示例\s+01/);
+  assert.match(dom.sections[1],/收藏的模板\s+01/);
   // Rendering-level URL policy is asserted in client/tests/gallery.test.ts; here we
   // confirm the persisted template stays a bare catalog path (versioning is render-time)
   // while the generated picture is a local data URL in its own key.

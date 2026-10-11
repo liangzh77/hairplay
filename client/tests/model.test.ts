@@ -5,18 +5,52 @@ import {readFileSync} from 'node:fs';
 const jpegB64=readFileSync(new URL('../src/static/catalog/ai-catalog-44-0.jpg',import.meta.url)).toString('base64');
 const jpegPayload='data:image/jpeg;base64,'+jpegB64;
 const fakePayload='data:image/jpeg;base64,/9j/'+'A'.repeat(2_000);
-import {catalog,categories,filterStyles,heroStyleFor,initialState,decodeState,validatePhoto,LocalGenerationService,makeRecord,removeRecords,makeGeneratedRecord,decodeGenerations,removeGenerations,insertGeneration,isValidGeneratedImage,jpegEndsWithEoi,jpegHasSegments,GENERATION_LIMIT,GENERATION_IMAGE_MAX,type GeneratedRecord} from '../src/core/model';
+import {catalog,categories,filterStyles,heroStyleFor,initialState,decodeState,validatePhoto,makeSavedStyle,isSavedStyle,decodeFavorites,insertFavorite,removeFavorites,FAVORITE_LIMIT,makeGeneratedRecord,decodeGenerations,removeGenerations,insertGeneration,isValidGeneratedImage,jpegEndsWithEoi,jpegHasSegments,GENERATION_LIMIT,GENERATION_IMAGE_MAX,type GeneratedRecord} from '../src/core/model';
 test('observed catalog and filtering',()=>{assert.equal(catalog.length,27);assert.equal(categories.length,14);for(const c of categories.slice(1))assert.ok(filterStyles(c,'').length>0,c);assert.equal(filterStyles('男士',' 庞巴杜 ').length,1);assert.equal(filterStyles('男士','no matching result').length,0);assert.equal(filterStyles('所有风格','').length,catalog.length);});
 test('all-styles hero follows stored gender, unknown defaults to female example',()=>{
  assert.deepEqual([heroStyleFor('male').id,heroStyleFor('female').id,heroStyleFor(null).id,heroStyleFor(undefined).id],['catalog-54-1','catalog-44-1','catalog-44-1','catalog-44-1']);
  assert.equal(heroStyleFor('male').name,'发际纹身渐变');assert.equal(heroStyleFor(null).name,'许士剪');
 });
-test('storage round trip and selective deletion',()=>{const state=initialState();state.records.push(makeRecord({demo:true,style:catalog[0]}));state.bannerHidden=true;state.options={'风格类型':'职业'};const restored=decodeState(JSON.stringify(state));assert.deepEqual(restored,state);assert.equal(removeRecords(state,[state.records[0].id]).records.length,0);assert.equal(state.records.length,1);});
-test('corrupt storage is tolerated and untrusted images discarded',()=>{for(const input of ['{',null,[],{version:2}])assert.deepEqual(decodeState(input),initialState());const s=decodeState({version:1,options:{'风格类型':42},records:[{demo:true,id:'x',name:'x',image:'https://evil.invalid/private',created:'x',beforeLabel:'x'}]});assert.equal(s.records.length,0);assert.deepEqual(s.options,{});});
+test('favourites are catalogue copies that round-trip and can be removed',()=>{
+ const style=catalog[0],saved=makeSavedStyle(style);
+ assert.equal(saved.styleId,style.id);assert.equal(saved.id,`fav-${style.id}`);assert.equal(saved.name,style.name);assert.equal(saved.image,style.image);
+ assert.equal(isSavedStyle(saved),true);
+ const state=initialState();state.favorites=[saved];state.bannerHidden=true;state.options={'风格类型':'职业'};
+ const restored=decodeState(JSON.stringify(state));assert.deepEqual(restored,state);
+ assert.deepEqual(removeFavorites(state.favorites,[style.id]),[]);assert.equal(state.favorites.length,1,'the source list is not mutated');
+ const inserted=insertFavorite(state.favorites,catalog[1]);assert.equal(inserted[0].styleId,catalog[1].id);assert.equal(inserted.length,2);
+ // Re-saving is idempotent: one entry per style, newest first.
+ assert.deepEqual(insertFavorite(inserted,catalog[1]).map(f=>f.styleId),[catalog[1].id,style.id]);
+ let full=[] as ReturnType<typeof makeSavedStyle>[];for(const s of catalog)full=insertFavorite(full,s);
+ for(const s of catalog)full=insertFavorite(full,s);
+ assert.equal(full.length,Math.min(catalog.length,FAVORITE_LIMIT));assert.equal(new Set(full.map(f=>f.styleId)).size,full.length);
+ assert.equal(FAVORITE_LIMIT,50);
+ // A stored record that resolves to no catalogue entry is discarded, and one that
+ // does resolve is normalised to the catalogue's own image path, so a tampered or
+ // stale copy of a favourite can never point somewhere else.
+ for(const bad of [{},{id:'x',name:'x',created:'x'},{styleId:'nope',image:'https://evil.invalid/a.jpg',name:'x',created:'x'},{...saved,name:''},{...saved,name:'x'.repeat(61)},{...saved,created:7},null,'x',42])assert.deepEqual(decodeFavorites([bad]),[],JSON.stringify(bad).slice(0,40));
+ assert.equal(decodeFavorites([{...saved,image:'https://evil.invalid/a.jpg'}])[0].image,style.image);
+ // A record with no usable style id falls back to matching the catalogue by image
+ // path, so a renamed/legacy entry still resolves instead of being thrown away.
+ assert.deepEqual(decodeFavorites([{...saved,styleId:'nope'}]).map(f=>f.styleId),[style.id]);
+ assert.deepEqual(decodeFavorites('{'),[]);assert.deepEqual(decodeFavorites({length:0}),[]);assert.deepEqual(decodeFavorites(null),[]);
+});
+test('legacy demo records migrate into favourites by their image path',()=>{
+ const style=catalog[2];
+ const legacy={version:1,options:{},records:[{demo:true,id:'demo-x',name:style.name,image:style.image,created:'2026-01-02T03:04:05.000Z'}]};
+ const migrated=decodeState(legacy);
+ assert.deepEqual(migrated.favorites,[{id:`fav-${style.id}`,styleId:style.id,name:style.name,image:style.image,created:'2026-01-02T03:04:05.000Z'}]);
+ assert.deepEqual(decodeState({version:1,options:{},records:[{demo:true,id:'demo-x',name:'x',image:'https://evil.invalid/private',created:'x'}]}).favorites,[]);
+});
+test('corrupt storage is tolerated and untrusted images discarded',()=>{for(const input of ['{',null,[],{version:2}])assert.deepEqual(decodeState(input),initialState());const s=decodeState({version:1,options:{'风格类型':42},favorites:[{demo:true,id:'x',name:'x',image:'https://evil.invalid/private',created:'x',beforeLabel:'x'}]});assert.equal(s.favorites.length,0);assert.deepEqual(s.options,{});});
 test('file limits and dimensions',()=>{const valid={size:120,type:'image/png',width:64,height:64};assert.equal(validatePhoto(valid),'');assert.match(validatePhoto({...valid,type:'text/plain'}),/JPG/);assert.match(validatePhoto({...valid,size:0}),/损坏/);assert.match(validatePhoto({...valid,size:8*1024*1024+1}),/8 MB/);assert.match(validatePhoto({...valid,width:10}),/尺寸/);assert.match(validatePhoto({...valid,width:10000,height:10000}),/尺寸/);});
-test('service is explicitly unconfigured and demo opt-in required',async()=>{const service=new LocalGenerationService();const r={photo:'blob:local',options:{},requirements:'test',demo:false};await assert.rejects(service.generate({...r,photo:''}),/上传/);await assert.rejects(service.generate(r),/服务未配置/);const result=await service.generate({...r,demo:true,styleId:catalog[0].id});assert.equal(result.demo,true);assert.equal(result.style.id,catalog[0].id);assert.equal(makeRecord(result).demo,true);});
+test('the real generation service is not reachable without a server, and the client refuses to fake it',()=>{
+ // The browser/mp client only ever calls the signed-in HTTP endpoint; there is no
+ // local fallback that could pass a catalogue example off as a generated picture.
+ assert.equal(decodeGenerations(JSON.stringify([{source:'ai',id:'gen-1',name:'x',created:'x',image:jpegPayload}])).length,1);
+});
 
-test('AI generations are local, jpeg-only, bounded and removable',()=>{
+test('AI generations are cloud-linked, jpeg-only, bounded and removable',()=>{
  const payload=jpegPayload;
  const record=makeGeneratedRecord('发际纹身渐变',payload);
  assert.equal(record.source,'ai');assert.ok(record.id.startsWith('gen-'));assert.equal(record.name,'发际纹身渐变');
@@ -58,6 +92,16 @@ test('AI generations are local, jpeg-only, bounded and removable',()=>{
  assert.equal(GENERATION_LIMIT,6);
  assert.deepEqual(removeGenerations([record],[]),[record]);assert.deepEqual(removeGenerations([record],[record.id]),[]);
  assert.equal(makeGeneratedRecord('','x').name,'AI 发型');
+ // The account id is the only link to the cloud copy, so a malformed one is dropped
+ // instead of being stored as an unverifiable pointer.
+ assert.equal(makeGeneratedRecord('x',payload).cloud,undefined);
+ assert.equal(makeGeneratedRecord('x',payload,'a'.repeat(24)).cloud,'a'.repeat(24));
+ for(const bad of ['a'.repeat(23),'A'.repeat(24),'gen-1','',null])assert.equal(makeGeneratedRecord('x',payload,bad as string|undefined).cloud,undefined);
+ const linked=makeGeneratedRecord('x',payload,'0123456789abcdef01234567');
+ assert.deepEqual(decodeGenerations([linked]),[linked]);
+ // A stored pointer that is not a server id is dropped, but the cached picture stays.
+ const {cloud:_,...withoutCloud}=linked;
+ assert.deepEqual(decodeGenerations([{...linked,cloud:'nope'}]),[withoutCloud]);
  const inserted=insertGeneration([{...record,id:'gen-old'}],{...record,id:'gen-new'});
  assert.equal(inserted[0].id,'gen-new');assert.equal(inserted.length,2);
  let full:GeneratedRecord[]=[record];for(let i=0;i<GENERATION_LIMIT+3;i++)full=insertGeneration(full,{...record,id:`gen-${i + 100}`});

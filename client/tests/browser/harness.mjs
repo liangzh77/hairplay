@@ -42,7 +42,7 @@ export const readRepo = (...parts) => readFile(repoPath(...parts));
 export const liveBase = () => process.env.HAIRPLAY_BASE || 'https://liangz77.cn/hairplay/';
 
 export const readGenerations = page => page.evaluate(key => JSON.parse(localStorage.getItem(key) || '[]'), GENERATIONS_KEY);
-export const readRecords = page => page.evaluate(key => JSON.parse(localStorage.getItem(key) || '{}').records || [], STATE_KEY);
+export const readFavorites = page => page.evaluate(key => JSON.parse(localStorage.getItem(key) || '{}').favorites || [], STATE_KEY);
 
 const MIME = {
   '.html': 'text/html',
